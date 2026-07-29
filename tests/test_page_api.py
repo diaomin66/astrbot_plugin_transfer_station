@@ -25,6 +25,8 @@ async def test_page_routes_and_inventory_operations(tmp_path):
     api = GiftPageApi(context, storage)
     api.register_routes()
     app = Quart(__name__)
+    await storage.record_group_baseline("100", ["200"])
+    assert await storage.register_newcomer("100", "201") == "eligible"
 
     route_methods = {(route, tuple(methods)) for route, _, methods, _ in context.routes}
     assert (
@@ -66,6 +68,8 @@ async def test_page_routes_and_inventory_operations(tmp_path):
     async with app.test_request_context("/summary"):
         summary = await api.get_summary()
     assert summary["data"]["available_codes"] == 0
+    assert summary["data"]["known_users"] == 2
+    assert summary["data"]["today_newcomers"] == 1
 
 
 @pytest.mark.asyncio

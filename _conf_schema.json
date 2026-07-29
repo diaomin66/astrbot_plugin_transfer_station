@@ -38,8 +38,8 @@
   "not_eligible_content": {
     "description": "无新人资格提示",
     "type": "text",
-    "default": "只有插件记录到的新入群成员才能领取新人礼。",
-    "hint": "用户没有当前群的新人资格时回复。"
+    "default": "只有永久用户库中从未出现过的新入群成员才能领取新人礼。",
+    "hint": "QQ ID 已被永久记录或没有当前群新人资格时回复。"
   },
   "no_codes_content": {
     "description": "库存不足提示",
@@ -52,6 +52,12 @@
     "type": "text",
     "default": "机器人暂时无法主动发起群临时会话。请先主动私聊机器人发送任意消息建立会话，然后回到本群重新 @机器人并发送“{claim_phrase}”。本次兑换码已退回库存。",
     "hint": "支持 {claim_phrase} 占位符；用户主动建立会话后可回群重新领取。"
+  },
+  "baseline_pending_content": {
+    "description": "成员基线未完成提示",
+    "type": "text",
+    "default": "本群成员基线尚未同步完成，暂时无法领取新人礼，请稍后重试。",
+    "hint": "群成员列表同步失败时停止发放并回复，防止老成员通过退群重进获得新人资格。"
   },
   "claim_failed_content": {
     "description": "其他领取失败提示",

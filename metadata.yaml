@@ -1,7 +1,7 @@
 name: astrbot_plugin_transfer_station
 display_name: 中转站机器人
-desc: 自动欢迎入群新人，并通过 QQ 群临时会话发放一次性新人礼兑换码。
-version: v1.1.0
+desc: 自动同步 QQ 群成员永久防重，并通过群临时会话向新入群用户发放一次性兑换码。
+version: v1.2.0
 author: diaomin66
 repo: https://github.com/diaomin66/astrbot_plugin_transfer_station
 entry: main.py

@@ -14,7 +14,7 @@
         <div>
           <p class="eyebrow">TRANSFER STATION</p>
           <h1>新人礼管理</h1>
-          <p class="subtitle">管理可发放兑换码，查看新人资格与领取记录。</p>
+          <p class="subtitle">管理兑换码并实时查看永久用户库、新人资格与领取记录。</p>
         </div>
         <button id="refreshButton" class="button secondary" type="button">刷新数据</button>
       </header>
@@ -35,6 +35,14 @@
         <article class="stat-card">
           <span>资格记录</span>
           <strong id="eligibleMembers">—</strong>
+        </article>
+        <article class="stat-card">
+          <span>数据库人数</span>
+          <strong id="knownUsers">—</strong>
+        </article>
+        <article class="stat-card">
+          <span>今日新人</span>
+          <strong id="todayNewcomers">—</strong>
         </article>
       </section>
 
@@ -65,8 +73,10 @@
           <p class="eyebrow">DELIVERY POLICY</p>
           <h2>发放规则</h2>
           <ul>
-            <li>仅插件记录到的本群新人可以领取。</li>
+            <li>启用群会先永久记录当前全部成员 QQ ID。</li>
+            <li>只有数据库从未出现过的新入群 QQ ID 可以领取。</li>
             <li>同一 QQ 号在所有群中只能领取一次。</li>
+            <li>退群重进不会重新获得新人资格。</li>
             <li>兑换码仅通过 QQ 群临时会话发送。</li>
             <li>发送成功后立即删除；失败则退回库存。</li>
           </ul>

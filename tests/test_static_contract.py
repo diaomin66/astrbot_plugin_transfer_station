@@ -13,7 +13,7 @@ def test_metadata_and_config_contract():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
     assert metadata["name"] == "astrbot_plugin_transfer_station"
-    assert metadata["version"] == "v1.1.0"
+    assert metadata["version"] == "v1.2.0"
     assert metadata["support_platforms"] == ["aiocqhttp"]
     assert metadata["astrbot_version"] == ">=4.16,<5"
     assert metadata["pages"][0]["name"] == "gift_codes"
@@ -27,6 +27,7 @@ def test_metadata_and_config_contract():
         "not_eligible_content",
         "no_codes_content",
         "temporary_chat_failed_content",
+        "baseline_pending_content",
         "claim_failed_content",
         "claim_phrase",
         "mention_new_member",
@@ -45,7 +46,12 @@ def test_page_uses_bridge_and_safe_dynamic_text_rendering():
     assert "bridge.apiPost" in script
     assert "确认删除" in script
     assert "window.confirm" not in script
+    assert 'document.getElementById("knownUsers")' in script
+    assert 'document.getElementById("todayNewcomers")' in script
+    assert "window.setInterval" in script
     assert ".textContent" in script
     assert ".innerHTML" not in script
     assert ".code-cell {\n  display: flex" not in style
     assert "table-layout: fixed" in style
+    assert 'id="knownUsers"' in html
+    assert 'id="todayNewcomers"' in html

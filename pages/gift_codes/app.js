@@ -1,5 +1,6 @@
 const bridge = window.AstrBotPluginPage;
 const PAGE_SIZE = 20;
+const SUMMARY_REFRESH_MS = 10000;
 
 const state = {
   codePage: 1,
@@ -13,6 +14,8 @@ const elements = {
   claimedUsers: document.getElementById("claimedUsers"),
   pendingNewcomers: document.getElementById("pendingNewcomers"),
   eligibleMembers: document.getElementById("eligibleMembers"),
+  knownUsers: document.getElementById("knownUsers"),
+  todayNewcomers: document.getElementById("todayNewcomers"),
   refreshButton: document.getElementById("refreshButton"),
   importForm: document.getElementById("importForm"),
   importButton: document.getElementById("importButton"),
@@ -82,6 +85,8 @@ async function loadSummary() {
   elements.claimedUsers.textContent = String(data.claimed_users ?? 0);
   elements.pendingNewcomers.textContent = String(data.pending_newcomers ?? 0);
   elements.eligibleMembers.textContent = String(data.eligible_members ?? 0);
+  elements.knownUsers.textContent = String(data.known_users ?? 0);
+  elements.todayNewcomers.textContent = String(data.today_newcomers ?? 0);
 }
 
 function renderCodes(data) {
@@ -286,6 +291,11 @@ async function init() {
     syncTheme(context);
     bridge.onContext(syncTheme);
     await refreshAll();
+    window.setInterval(() => {
+      if (!document.hidden) {
+        loadSummary().catch(() => {});
+      }
+    }, SUMMARY_REFRESH_MS);
   } catch (error) {
     showToast(error.message || "页面初始化失败。", "error");
   }

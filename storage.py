@@ -11,7 +11,7 @@ from pathlib import Path
 
 import aiosqlite
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -78,6 +78,41 @@ class GiftStorage:
                         code_digest TEXT NOT NULL,
                         claimed_at TEXT NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS known_users (
+                        user_id TEXT PRIMARY KEY,
+                        first_group_id TEXT NOT NULL,
+                        first_seen_at TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        eligible_group_id TEXT
+                    );
+
+                    CREATE TABLE IF NOT EXISTS group_baselines (
+                        group_id TEXT PRIMARY KEY,
+                        synced_at TEXT NOT NULL,
+                        member_count INTEGER NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_known_users_source_seen
+                    ON known_users(source, first_seen_at);
+                    """
+                )
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO known_users(
+                        user_id, first_group_id, first_seen_at, source, eligible_group_id
+                    )
+                    SELECT user_id, group_id, claimed_at, 'claimed', NULL
+                    FROM claims
+                    """
+                )
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO known_users(
+                        user_id, first_group_id, first_seen_at, source, eligible_group_id
+                    )
+                    SELECT user_id, group_id, joined_at, 'legacy', NULL
+                    FROM eligible_members
                     """
                 )
                 await db.execute(
@@ -100,31 +135,138 @@ class GiftStorage:
             await db.execute("PRAGMA foreign_keys=ON")
             yield db
 
-    async def add_eligible(self, group_id: str, user_id: str) -> bool:
+    async def is_group_baselined(self, group_id: str) -> bool:
+        group_id = str(group_id).strip()
+        if not group_id:
+            return False
+        async with self._connection() as db:
+            cursor = await db.execute(
+                """
+                SELECT 1 FROM group_baselines
+                WHERE group_id = ?
+                LIMIT 1
+                """,
+                (group_id,),
+            )
+            return await cursor.fetchone() is not None
+
+    async def record_group_baseline(
+        self,
+        group_id: str,
+        user_ids: list[str],
+    ) -> dict[str, int | bool]:
+        group_id = str(group_id).strip()
+        normalized = sorted(
+            {str(user_id).strip() for user_id in user_ids if str(user_id).strip()}
+        )
+        if not group_id:
+            return {"created": False, "members": 0, "inserted_users": 0}
+
+        async with self._write_lock, self._connection() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            existing = await db.execute(
+                "SELECT 1 FROM group_baselines WHERE group_id = ? LIMIT 1",
+                (group_id,),
+            )
+            created = await existing.fetchone() is None
+
+            now = utc_now()
+            inserted_users = 0
+            for user_id in normalized:
+                cursor = await db.execute(
+                    """
+                    INSERT OR IGNORE INTO known_users(
+                        user_id, first_group_id, first_seen_at, source, eligible_group_id
+                    )
+                    VALUES (?, ?, ?, 'baseline', NULL)
+                    """,
+                    (user_id, group_id, now),
+                )
+                inserted_users += cursor.rowcount
+
+            await db.execute(
+                """
+                INSERT INTO group_baselines(group_id, synced_at, member_count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    synced_at = excluded.synced_at,
+                    member_count = excluded.member_count
+                """,
+                (group_id, now, len(normalized)),
+            )
+            await db.commit()
+            return {
+                "created": created,
+                "members": len(normalized),
+                "inserted_users": inserted_users,
+            }
+
+    async def register_newcomer(self, group_id: str, user_id: str) -> str:
+        """Permanently register a never-seen QQ ID as a one-time newcomer."""
         group_id = str(group_id).strip()
         user_id = str(user_id).strip()
         if not group_id or not user_id:
-            return False
+            return "baseline_pending"
+
         async with self._write_lock, self._connection() as db:
-            cursor = await db.execute(
+            await db.execute("BEGIN IMMEDIATE")
+            baseline_cursor = await db.execute(
+                """
+                SELECT 1 FROM group_baselines
+                WHERE group_id = ?
+                LIMIT 1
+                """,
+                (group_id,),
+            )
+            if await baseline_cursor.fetchone() is None:
+                await db.rollback()
+                return "baseline_pending"
+
+            known_cursor = await db.execute(
+                "SELECT 1 FROM known_users WHERE user_id = ? LIMIT 1",
+                (user_id,),
+            )
+            if await known_cursor.fetchone() is not None:
+                await db.rollback()
+                return "known"
+
+            now = utc_now()
+            await db.execute(
+                """
+                INSERT INTO known_users(
+                    user_id, first_group_id, first_seen_at, source, eligible_group_id
+                )
+                VALUES (?, ?, ?, 'newcomer', ?)
+                """,
+                (user_id, group_id, now, group_id),
+            )
+            await db.execute(
                 """
                 INSERT OR IGNORE INTO eligible_members(group_id, user_id, joined_at)
                 VALUES (?, ?, ?)
                 """,
-                (group_id, user_id, utc_now()),
+                (group_id, user_id, now),
             )
             await db.commit()
-            return cursor.rowcount == 1
+            return "eligible"
 
     async def is_eligible(self, group_id: str, user_id: str) -> bool:
         async with self._connection() as db:
             cursor = await db.execute(
                 """
-                SELECT 1 FROM eligible_members
-                WHERE group_id = ? AND user_id = ?
+                SELECT 1
+                FROM known_users
+                JOIN eligible_members
+                  ON eligible_members.user_id = known_users.user_id
+                 AND eligible_members.group_id = known_users.eligible_group_id
+                LEFT JOIN claims ON claims.user_id = known_users.user_id
+                WHERE known_users.user_id = ?
+                  AND known_users.eligible_group_id = ?
+                  AND known_users.source = 'newcomer'
+                  AND claims.user_id IS NULL
                 LIMIT 1
                 """,
-                (str(group_id), str(user_id)),
+                (str(user_id), str(group_id)),
             )
             return await cursor.fetchone() is not None
 
@@ -228,12 +370,27 @@ class GiftStorage:
             queries = {
                 "available_codes": "SELECT COUNT(*) AS value FROM gift_codes",
                 "claimed_users": "SELECT COUNT(*) AS value FROM claims",
-                "eligible_members": "SELECT COUNT(*) AS value FROM eligible_members",
+                "eligible_members": """
+                    SELECT COUNT(*) AS value
+                    FROM known_users
+                    WHERE source = 'newcomer'
+                """,
                 "pending_newcomers": """
-                    SELECT COUNT(DISTINCT eligible_members.user_id) AS value
-                    FROM eligible_members
-                    LEFT JOIN claims ON claims.user_id = eligible_members.user_id
-                    WHERE claims.user_id IS NULL
+                    SELECT COUNT(*) AS value
+                    FROM known_users
+                    LEFT JOIN claims ON claims.user_id = known_users.user_id
+                    WHERE known_users.source = 'newcomer'
+                      AND claims.user_id IS NULL
+                """,
+                "known_users": """
+                    SELECT COUNT(*) AS value
+                    FROM known_users
+                """,
+                "today_newcomers": """
+                    SELECT COUNT(*) AS value
+                    FROM known_users
+                    WHERE source = 'newcomer'
+                      AND date(first_seen_at, 'localtime') = date('now', 'localtime')
                 """,
             }
             result: dict[str, int] = {}
@@ -265,11 +422,17 @@ class GiftStorage:
 
             eligible_cursor = await db.execute(
                 """
-                SELECT 1 FROM eligible_members
-                WHERE group_id = ? AND user_id = ?
+                SELECT 1
+                FROM known_users
+                JOIN eligible_members
+                  ON eligible_members.user_id = known_users.user_id
+                 AND eligible_members.group_id = known_users.eligible_group_id
+                WHERE known_users.user_id = ?
+                  AND known_users.eligible_group_id = ?
+                  AND known_users.source = 'newcomer'
                 LIMIT 1
                 """,
-                (group_id, user_id),
+                (user_id, group_id),
             )
             if await eligible_cursor.fetchone() is None:
                 await db.rollback()
@@ -309,6 +472,14 @@ class GiftStorage:
                     code_digest(code),
                     utc_now(),
                 ),
+            )
+            await db.execute(
+                """
+                UPDATE known_users
+                SET eligible_group_id = NULL
+                WHERE user_id = ?
+                """,
+                (user_id,),
             )
             await db.execute("DELETE FROM gift_codes WHERE id = ?", (code_id,))
             await db.commit()

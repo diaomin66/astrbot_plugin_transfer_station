@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
 import pytest
 from conftest import load_plugin_module
@@ -9,13 +10,24 @@ storage_module = load_plugin_module("storage")
 GiftStorage = storage_module.GiftStorage
 
 
+async def register_newcomer(
+    storage: GiftStorage,
+    group_id: str,
+    user_id: str,
+) -> None:
+    await storage.record_group_baseline(group_id, [])
+    assert await storage.register_newcomer(group_id, user_id) == "eligible"
+
+
 @pytest.mark.asyncio
 async def test_import_summary_and_persistence(tmp_path):
     db_path = tmp_path / "gifts.db"
     storage = GiftStorage(db_path)
 
-    assert await storage.add_eligible("100", "200") is True
-    assert await storage.add_eligible("100", "200") is False
+    baseline = await storage.record_group_baseline("100", ["101", "102"])
+    assert baseline == {"created": True, "members": 2, "inserted_users": 2}
+    assert await storage.register_newcomer("100", "200") == "eligible"
+    assert await storage.register_newcomer("100", "200") == "known"
     result = await storage.import_codes([" CODE-A ", "", "CODE-A", "CODE-B"])
 
     assert result == {"received": 3, "inserted": 2, "duplicates": 1}
@@ -24,9 +36,17 @@ async def test_import_summary_and_persistence(tmp_path):
         "claimed_users": 0,
         "eligible_members": 1,
         "pending_newcomers": 1,
+        "known_users": 3,
+        "today_newcomers": 1,
     }
 
     reloaded = GiftStorage(db_path)
+    assert await reloaded.is_eligible("100", "200") is True
+    assert await reloaded.is_group_baselined("100") is True
+    assert await reloaded.register_newcomer("100", "101") == "known"
+    refreshed = await reloaded.record_group_baseline("100", ["101", "102", "103"])
+    assert refreshed == {"created": False, "members": 3, "inserted_users": 1}
+    assert await reloaded.register_newcomer("100", "103") == "known"
     assert await reloaded.is_eligible("100", "200") is True
     assert (await reloaded.list_codes(1, 20))["total"] == 2
 
@@ -34,8 +54,9 @@ async def test_import_summary_and_persistence(tmp_path):
 @pytest.mark.asyncio
 async def test_successful_claim_consumes_code_and_is_global(tmp_path):
     storage = GiftStorage(tmp_path / "gifts.db")
-    await storage.add_eligible("100", "200")
-    await storage.add_eligible("101", "200")
+    await register_newcomer(storage, "100", "200")
+    await storage.record_group_baseline("101", [])
+    assert await storage.register_newcomer("101", "200") == "known"
     await storage.import_codes(["SECRET-CODE-A", "SECRET-CODE-B"])
     sent: list[str] = []
 
@@ -55,6 +76,9 @@ async def test_successful_claim_consumes_code_and_is_global(tmp_path):
 
     assert outcome.status == "success"
     assert second.status == "already_claimed"
+    assert await storage.is_eligible("100", "200") is False
+    assert await storage.register_newcomer("100", "200") == "known"
+    assert (await storage.summary())["known_users"] == 1
     assert sent == ["SECRET-CODE-A"]
     assert (await storage.list_codes(1, 20))["items"][0]["code"] == "SECRET-CODE-B"
     claims = await storage.list_claims(1, 20)
@@ -65,7 +89,7 @@ async def test_successful_claim_consumes_code_and_is_global(tmp_path):
 @pytest.mark.asyncio
 async def test_failed_delivery_rolls_back_inventory_and_claim(tmp_path):
     storage = GiftStorage(tmp_path / "gifts.db")
-    await storage.add_eligible("100", "200")
+    await register_newcomer(storage, "100", "200")
     await storage.import_codes(["ROLLBACK-CODE"])
 
     async def sender(_code: str) -> None:
@@ -86,6 +110,7 @@ async def test_failed_delivery_rolls_back_inventory_and_claim(tmp_path):
 @pytest.mark.asyncio
 async def test_ineligible_and_empty_inventory_results(tmp_path):
     storage = GiftStorage(tmp_path / "gifts.db")
+    await storage.record_group_baseline("100", ["200"])
 
     async def sender(_code: str) -> None:
         raise AssertionError("must not send")
@@ -98,11 +123,11 @@ async def test_ineligible_and_empty_inventory_results(tmp_path):
         )
     ).status == "not_eligible"
 
-    await storage.add_eligible("100", "200")
+    assert await storage.register_newcomer("100", "201") == "eligible"
     assert (
         await storage.claim_code(
             group_id="100",
-            user_id="200",
+            user_id="201",
             send_code=sender,
         )
     ).status == "no_codes"
@@ -111,8 +136,9 @@ async def test_ineligible_and_empty_inventory_results(tmp_path):
 @pytest.mark.asyncio
 async def test_concurrent_claims_cannot_share_last_code(tmp_path):
     storage = GiftStorage(tmp_path / "gifts.db")
-    await storage.add_eligible("100", "201")
-    await storage.add_eligible("100", "202")
+    await storage.record_group_baseline("100", [])
+    assert await storage.register_newcomer("100", "201") == "eligible"
+    assert await storage.register_newcomer("100", "202") == "eligible"
     await storage.import_codes(["LAST-CODE"])
     sent: list[tuple[str, str]] = []
 
@@ -132,3 +158,63 @@ async def test_concurrent_claims_cannot_share_last_code(tmp_path):
     assert sorted(outcome.status for outcome in outcomes) == ["no_codes", "success"]
     assert len(sent) == 1
     assert (await storage.summary())["available_codes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_baseline_and_known_users_cannot_gain_new_eligibility(tmp_path):
+    storage = GiftStorage(tmp_path / "gifts.db")
+    await storage.record_group_baseline("100", ["200"])
+
+    assert await storage.register_newcomer("100", "200") == "known"
+    assert await storage.register_newcomer("101", "200") == "baseline_pending"
+    await storage.record_group_baseline("101", [])
+    assert await storage.register_newcomer("101", "200") == "known"
+    assert await storage.is_eligible("100", "200") is False
+    assert await storage.is_eligible("101", "200") is False
+
+
+@pytest.mark.asyncio
+async def test_schema_v2_migrates_legacy_ids_as_permanently_known(tmp_path):
+    db_path = tmp_path / "gifts.db"
+    with sqlite3.connect(db_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE eligible_members (
+                group_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                joined_at TEXT NOT NULL,
+                PRIMARY KEY (group_id, user_id)
+            );
+            CREATE TABLE gift_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE claims (
+                user_id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                code_suffix TEXT NOT NULL,
+                code_digest TEXT NOT NULL,
+                claimed_at TEXT NOT NULL
+            );
+            INSERT INTO schema_meta(key, value) VALUES ('schema_version', '1');
+            INSERT INTO eligible_members(group_id, user_id, joined_at)
+            VALUES ('100', '200', '2026-07-28T00:00:00+00:00');
+            INSERT INTO claims(user_id, group_id, code_suffix, code_digest, claimed_at)
+            VALUES ('201', '100', 'CODE', 'digest', '2026-07-28T01:00:00+00:00');
+            PRAGMA user_version = 1;
+            """
+        )
+
+    storage = GiftStorage(db_path)
+    await storage.initialize()
+    await storage.record_group_baseline("100", [])
+
+    assert (await storage.summary())["known_users"] == 2
+    assert await storage.register_newcomer("100", "200") == "known"
+    assert await storage.register_newcomer("100", "201") == "known"
+    assert await storage.is_eligible("100", "200") is False
