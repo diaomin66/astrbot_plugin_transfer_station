@@ -42,3 +42,22 @@
 - `LICENSE`：新增 MIT 许可证。
 - `progress.md`：追加本轮实现、验证、文件清单和回滚说明。
 - 回滚方式：发布后在仓库执行 `git revert <本次初始提交哈希>`；若已安装到 AstrBot，可同时删除 `data/plugins/astrbot_plugin_transfer_station`，需要清除业务数据时再手动删除 `data/plugin_data/astrbot_plugin_transfer_station`。
+
+## 2026-07-29 - Task: 发布公开 GitHub 仓库
+
+### What was done
+
+- 将本地默认分支从 `master` 调整为 `main`。
+- 创建公开仓库 `diaomin66/astrbot_plugin_transfer_station`。
+- 将初始功能提交 `2a8ef395aaf2e1595e5ba8961da8b270b776e938` 推送到远端 `main`。
+
+### Testing
+
+- `gh repo view` 确认仓库可访问、可见性为 `PUBLIC`、默认分支为 `main`。
+- `git ls-remote --heads origin main` 确认远端 `main` 指向初始功能提交。
+- GitHub Commits API 确认远端提交信息为 `feat: add transfer station newcomer gift plugin`。
+
+### Notes
+
+- `progress.md`：追加 GitHub 创建、推送和远端核验结果。
+- 回滚点：功能代码提交为 `2a8ef395aaf2e1595e5ba8961da8b270b776e938`；如需回退功能，执行 `git revert 2a8ef395aaf2e1595e5ba8961da8b270b776e938` 后推送。删除公开仓库属于高风险操作，应由仓库所有者在 GitHub 设置中单独确认。
