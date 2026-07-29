@@ -7,10 +7,19 @@
 | `enabled` | `true` | 插件总开关 |
 | `enabled_group_ids` | `[]` | 群号白名单；空列表表示全部群 |
 | `welcome_content` | 内置欢迎文案 | 支持 `{claim_phrase}` 占位符 |
+| `gift_message_content` | 内置兑换码私聊文案 | 支持 `{code}`、`{claim_phrase}`；缺少 `{code}` 时自动在末尾附加兑换码 |
+| `claim_success_content` | 内置发送成功提示 | 成功发送兑换码后的群内回复 |
+| `already_claimed_content` | 内置重复领取提示 | 用户已经成功领取时的群内回复 |
+| `not_eligible_content` | 内置无资格提示 | 用户没有当前群新人资格时的群内回复 |
+| `no_codes_content` | 内置库存不足提示 | 没有可用兑换码时的群内回复 |
+| `temporary_chat_failed_content` | 内置会话建立失败提示 | 支持 `{claim_phrase}`，默认引导用户先主动私聊再回群重试 |
+| `claim_failed_content` | 内置通用失败提示 | 未识别领取结果的群内回复 |
 | `claim_phrase` | `领取新人礼` | 新人必须准确发送的口令 |
 | `mention_new_member` | `true` | 欢迎消息是否自动 `@新人` |
 
 配置修改后在 AstrBot WebUI 重载插件。
+
+上述配置覆盖插件发送到 QQ 聊天中的全部文字。管理页面自身的按钮、提示和接口错误不属于机器人聊天文案。
 
 ## 2. 兑换码管理
 
@@ -56,7 +65,13 @@ data/plugin_data/astrbot_plugin_transfer_station/gifts.db
 - QQ 账号及新人隐私设置必须允许群临时会话。
 - 插件调用 `send_private_msg` 时会同时传入 `user_id` 和 `group_id`。
 
-若发送失败，群内会提示检查隐私和临时会话设置，兑换码会回滚到库存。
+若机器人主动建立临时会话失败：
+
+1. 兑换码立即回滚到库存，不会写入领取记录。
+2. 群内发送 `temporary_chat_failed_content` 配置的引导文案。
+3. 新人主动私聊机器人发送任意消息，建立可回复的会话上下文。
+4. 新人回到原群，重新 `@机器人` 并发送领取口令。
+5. 插件再次尝试发送；成功后才删除兑换码并记录领取。
 
 ## 6. 常见问题
 
@@ -75,7 +90,7 @@ data/plugin_data/astrbot_plugin_transfer_station/gifts.db
 
 ### 临时会话发送失败
 
-检查 QQ 隐私设置、NapCat 登录状态和 OneBot 日志。发送失败时不会消耗兑换码。
+这通常表示机器人没有成功主动创建初始临时会话，并不一定是新人隐私设置错误。请让新人先主动私聊机器人发送任意消息，再回群重新 `@机器人` 并发送领取口令。发送失败时不会消耗兑换码，也不会占用该用户的一次领取资格。
 
 ### 网络超时后的风险
 

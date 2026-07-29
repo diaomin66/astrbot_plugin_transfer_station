@@ -97,6 +97,48 @@ def test_config_and_exact_claim_matching(plugin):
     assert plugin._group_enabled("100") is True
 
 
+def test_all_bot_messages_are_configurable(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {
+            "claim_phrase": "拿礼物",
+            "welcome_content": "欢迎，发送 {claim_phrase}",
+            "gift_message_content": "专属内容：{code}；口令：{claim_phrase}",
+            "claim_success_content": "发送成功",
+            "already_claimed_content": "已经领过",
+            "not_eligible_content": "没有资格",
+            "no_codes_content": "暂时缺货",
+            "temporary_chat_failed_content": "先私聊，再发送 {claim_phrase}",
+            "claim_failed_content": "未知失败",
+        },
+    )
+
+    assert plugin._welcome_content() == "欢迎，发送 拿礼物"
+    assert (
+        plugin._gift_message_content("CODE-001") == "专属内容：CODE-001；口令：拿礼物"
+    )
+    assert plugin._outcome_content("success") == "发送成功"
+    assert plugin._outcome_content("already_claimed") == "已经领过"
+    assert plugin._outcome_content("not_eligible") == "没有资格"
+    assert plugin._outcome_content("no_codes") == "暂时缺货"
+    assert plugin._outcome_content("send_failed") == "先私聊，再发送 拿礼物"
+    assert plugin._outcome_content("unexpected") == "未知失败"
+
+
+def test_custom_gift_message_without_placeholder_still_includes_code(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {"gift_message_content": "这是你的新人礼"},
+    )
+
+    assert plugin._gift_message_content("CODE-001") == "这是你的新人礼\nCODE-001"
+
+
 @pytest.mark.asyncio
 async def test_group_increase_records_once_and_sends_welcome(plugin):
     raw = {
@@ -180,16 +222,30 @@ async def test_claim_sends_temporary_chat_and_consumes_code(plugin):
 
 
 @pytest.mark.asyncio
-async def test_claim_failure_returns_code_to_inventory(plugin):
+async def test_claim_failure_guides_user_and_retry_can_succeed(plugin):
     await plugin.storage.add_eligible("100", "200")
     await plugin.storage.import_codes(["WELCOME-001"])
-    event = FakeEvent(
+    failed_event = FakeEvent(
         messages=[Comp.At(qq="999"), Comp.Plain("领取新人礼")],
         bot=FakeBot(TimeoutError("timeout")),
     )
 
-    await plugin.handle_aiocqhttp_event(event)
+    await plugin.handle_aiocqhttp_event(failed_event)
 
-    assert "已退回库存" in event.sent[0]
+    assert "先主动私聊机器人发送任意消息" in failed_event.sent[0]
+    assert "重新 @机器人并发送“领取新人礼”" in failed_event.sent[0]
+    assert "已退回库存" in failed_event.sent[0]
     assert (await plugin.storage.summary())["available_codes"] == 1
     assert (await plugin.storage.summary())["claimed_users"] == 0
+
+    retry_bot = FakeBot()
+    retry_event = FakeEvent(
+        messages=[Comp.At(qq="999"), Comp.Plain("领取新人礼")],
+        bot=retry_bot,
+    )
+    await plugin.handle_aiocqhttp_event(retry_event)
+
+    assert retry_bot.calls[0][1]["message"].endswith("WELCOME-001")
+    assert retry_event.sent == ["新人礼已通过群临时会话发送，请查收。"]
+    assert (await plugin.storage.summary())["available_codes"] == 0
+    assert (await plugin.storage.summary())["claimed_users"] == 1

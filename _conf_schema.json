@@ -17,6 +17,48 @@
     "default": "欢迎加入本群！@机器人并发送“{claim_phrase}”即可领取新人礼。",
     "hint": "支持 {claim_phrase} 占位符，会替换为当前领取口令。"
   },
+  "gift_message_content": {
+    "description": "兑换码私聊内容",
+    "type": "text",
+    "default": "欢迎领取新人礼！你的兑换码是：{code}",
+    "hint": "支持 {code} 和 {claim_phrase} 占位符；未填写 {code} 时会自动在末尾附加兑换码。"
+  },
+  "claim_success_content": {
+    "description": "发送成功群内提示",
+    "type": "text",
+    "default": "新人礼已通过群临时会话发送，请查收。",
+    "hint": "兑换码成功发送并从库存删除后回复。"
+  },
+  "already_claimed_content": {
+    "description": "重复领取提示",
+    "type": "text",
+    "default": "你已经领取过新人礼，每人只能领取一次。",
+    "hint": "同一 QQ 号已经成功领取时回复。"
+  },
+  "not_eligible_content": {
+    "description": "无新人资格提示",
+    "type": "text",
+    "default": "只有插件记录到的新入群成员才能领取新人礼。",
+    "hint": "用户没有当前群的新人资格时回复。"
+  },
+  "no_codes_content": {
+    "description": "库存不足提示",
+    "type": "text",
+    "default": "新人礼兑换码库存不足，请联系管理员。",
+    "hint": "没有可用兑换码时回复。"
+  },
+  "temporary_chat_failed_content": {
+    "description": "主动临时会话失败提示",
+    "type": "text",
+    "default": "机器人暂时无法主动发起群临时会话。请先主动私聊机器人发送任意消息建立会话，然后回到本群重新 @机器人并发送“{claim_phrase}”。本次兑换码已退回库存。",
+    "hint": "支持 {claim_phrase} 占位符；用户主动建立会话后可回群重新领取。"
+  },
+  "claim_failed_content": {
+    "description": "其他领取失败提示",
+    "type": "text",
+    "default": "新人礼领取失败，请稍后重试。",
+    "hint": "遇到未识别的领取结果时回复。"
+  },
   "claim_phrase": {
     "description": "新人礼领取口令",
     "type": "string",

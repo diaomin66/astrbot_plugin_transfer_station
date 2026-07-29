@@ -13,7 +13,7 @@ def test_metadata_and_config_contract():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
     assert metadata["name"] == "astrbot_plugin_transfer_station"
-    assert metadata["version"] == "v1.0.1"
+    assert metadata["version"] == "v1.1.0"
     assert metadata["support_platforms"] == ["aiocqhttp"]
     assert metadata["astrbot_version"] == ">=4.16,<5"
     assert metadata["pages"][0]["name"] == "gift_codes"
@@ -21,6 +21,13 @@ def test_metadata_and_config_contract():
         "enabled",
         "enabled_group_ids",
         "welcome_content",
+        "gift_message_content",
+        "claim_success_content",
+        "already_claimed_content",
+        "not_eligible_content",
+        "no_codes_content",
+        "temporary_chat_failed_content",
+        "claim_failed_content",
         "claim_phrase",
         "mention_new_member",
     }

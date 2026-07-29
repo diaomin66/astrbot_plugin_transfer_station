@@ -13,7 +13,7 @@ from .page_api import GiftPageApi
 from .storage import ClaimOutcome, GiftStorage
 
 PLUGIN_NAME = "astrbot_plugin_transfer_station"
-PLUGIN_VERSION = "1.0.1"
+PLUGIN_VERSION = "1.1.0"
 REPOSITORY = "https://github.com/diaomin66/astrbot_plugin_transfer_station"
 
 
@@ -42,10 +42,73 @@ class TransferStationPlugin(Star):
         phrase = str(self.config.get("claim_phrase", "领取新人礼")).strip()
         return phrase or "领取新人礼"
 
+    def _configured_content(
+        self,
+        key: str,
+        default: str,
+        **placeholders: str,
+    ) -> str:
+        content = str(self.config.get(key, default)).strip() or default
+        for name, value in placeholders.items():
+            content = content.replace(f"{{{name}}}", value)
+        return content
+
     def _welcome_content(self) -> str:
         default = "欢迎加入本群！@机器人并发送“{claim_phrase}”即可领取新人礼。"
-        content = str(self.config.get("welcome_content", default)).strip() or default
-        return content.replace("{claim_phrase}", self._claim_phrase())
+        return self._configured_content(
+            "welcome_content",
+            default,
+            claim_phrase=self._claim_phrase(),
+        )
+
+    def _gift_message_content(self, code: str) -> str:
+        default = "欢迎领取新人礼！你的兑换码是：{code}"
+        template = (
+            str(self.config.get("gift_message_content", default)).strip() or default
+        )
+        if "{code}" not in template:
+            template = f"{template}\n{{code}}"
+        return template.replace("{code}", code).replace(
+            "{claim_phrase}",
+            self._claim_phrase(),
+        )
+
+    def _outcome_content(self, status: str) -> str:
+        replies = {
+            "success": (
+                "claim_success_content",
+                "新人礼已通过群临时会话发送，请查收。",
+            ),
+            "already_claimed": (
+                "already_claimed_content",
+                "你已经领取过新人礼，每人只能领取一次。",
+            ),
+            "not_eligible": (
+                "not_eligible_content",
+                "只有插件记录到的新入群成员才能领取新人礼。",
+            ),
+            "no_codes": (
+                "no_codes_content",
+                "新人礼兑换码库存不足，请联系管理员。",
+            ),
+            "send_failed": (
+                "temporary_chat_failed_content",
+                (
+                    "机器人暂时无法主动发起群临时会话。请先主动私聊机器人发送任意消息"
+                    "建立会话，然后回到本群重新 @机器人并发送“{claim_phrase}”。"
+                    "本次兑换码已退回库存。"
+                ),
+            ),
+        }
+        key, default = replies.get(
+            status,
+            ("claim_failed_content", "新人礼领取失败，请稍后重试。"),
+        )
+        return self._configured_content(
+            key,
+            default,
+            claim_phrase=self._claim_phrase(),
+        )
 
     @staticmethod
     def _raw_event(event: AstrMessageEvent) -> Mapping[str, Any] | None:
@@ -112,12 +175,11 @@ class TransferStationPlugin(Star):
         event.stop_event()
 
         async def send_code(code: str) -> None:
-            message = f"欢迎领取新人礼！你的兑换码是：{code}"
             await event.bot.call_action(
                 "send_private_msg",
                 user_id=int(user_id),
                 group_id=int(group_id),
-                message=message,
+                message=self._gift_message_content(code),
             )
 
         outcome = await self.storage.claim_code(
@@ -134,16 +196,6 @@ class TransferStationPlugin(Star):
         user_id: str,
         group_id: str,
     ) -> None:
-        replies = {
-            "success": "新人礼已通过群临时会话发送，请查收。",
-            "already_claimed": "你已经领取过新人礼，每人只能领取一次。",
-            "not_eligible": "只有插件记录到的新入群成员才能领取新人礼。",
-            "no_codes": "新人礼兑换码库存不足，请联系管理员。",
-            "send_failed": (
-                "群临时会话发送失败，请检查 QQ 隐私或临时会话设置后重试。"
-                "本次兑换码已退回库存。"
-            ),
-        }
         if outcome.status == "send_failed":
             logger.warning(
                 "Temporary chat delivery failed user=%s group=%s error_type=%s",
@@ -153,7 +205,7 @@ class TransferStationPlugin(Star):
             )
         await self._send_group_text(
             event,
-            replies.get(outcome.status, "新人礼领取失败，请稍后重试。"),
+            self._outcome_content(outcome.status),
         )
 
     @filter.platform_adapter_type(PlatformAdapterType.AIOCQHTTP)
