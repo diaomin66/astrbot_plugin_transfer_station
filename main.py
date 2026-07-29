@@ -13,7 +13,7 @@ from .page_api import GiftPageApi
 from .storage import ClaimOutcome, GiftStorage
 
 PLUGIN_NAME = "astrbot_plugin_transfer_station"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 REPOSITORY = "https://github.com/diaomin66/astrbot_plugin_transfer_station"
 
 

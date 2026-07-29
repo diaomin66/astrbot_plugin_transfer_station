@@ -230,6 +230,11 @@ textarea:focus {
   color: var(--accent-dark);
 }
 
+.button.danger.confirming {
+  background: var(--accent);
+  color: #fff;
+}
+
 .button.compact {
   padding: 8px 13px;
   font-size: 0.82rem;
@@ -259,6 +264,8 @@ textarea:focus {
 table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
+  min-width: 760px;
 }
 
 th,
@@ -285,13 +292,35 @@ td {
 }
 
 .code-cell {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  vertical-align: middle;
+}
+
+.code-table th:nth-child(1),
+.code-table td:nth-child(1) {
+  width: 76px;
+}
+
+.code-table th:nth-child(2),
+.code-table td:nth-child(2) {
+  width: 38%;
+}
+
+.code-table th:nth-child(3),
+.code-table td:nth-child(3) {
+  width: 240px;
+}
+
+.code-table th:nth-child(4),
+.code-table td:nth-child(4) {
+  width: 220px;
 }
 
 .code-value {
-  min-width: 160px;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: "Cascadia Code", Consolas, monospace;
   font-weight: 700;
 }

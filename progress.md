@@ -61,3 +61,31 @@
 
 - `progress.md`：追加 GitHub 创建、推送和远端核验结果。
 - 回滚点：功能代码提交为 `2a8ef395aaf2e1595e5ba8961da8b270b776e938`；如需回退功能，执行 `git revert 2a8ef395aaf2e1595e5ba8961da8b270b776e938` 后推送。删除公开仓库属于高风险操作，应由仓库所有者在 GitHub 设置中单独确认。
+
+## 2026-07-29 - Task: 修复兑换码列表错位和删除无响应
+
+### What was done
+
+- 修复兑换码 `<td>` 使用 Flex 布局导致表头和数据列错位的问题，改为固定表格布局和明确列宽。
+- 移除 AstrBot 沙箱 iframe 不支持的原生 `window.confirm()`，改为按钮内两次点击确认删除。
+- 增加删除确认状态和自动复位反馈，第二次点击后调用现有 Page Bridge 删除接口。
+- 将插件版本从 `v1.0.0` 提升到 `v1.0.1`。
+
+### Testing
+
+- Playwright 使用与 AstrBot 一致的 `sandbox="allow-scripts allow-forms allow-downloads"` iframe 复现：修复前删除接口调用次数为 0，并出现 `confirm()` 被沙箱拦截警告。
+- 修复后 Playwright 验证四列表头和数据单元格位置、宽度一致，所有兑换码数据单元格保持 `display: table-cell`。
+- 修复后首次点击进入确认状态且不调用接口，第二次点击调用删除接口 1 次，沙箱警告为 0。
+- `python -m pytest -q`：14 项测试全部通过。
+- `python -m ruff check .`、`python -m ruff format --check .`、Python 编译和 JavaScript 语法检查全部通过。
+
+### Notes
+
+- `pages/gift_codes/index.html`：为兑换码库存表增加专用表格类。
+- `pages/gift_codes/style.css`：修复表格单元格布局并增加确认删除状态样式。
+- `pages/gift_codes/app.js`：用沙箱兼容的按钮二次确认替换原生确认弹窗。
+- `tests/test_static_contract.py`：增加表格布局、禁用 `window.confirm()` 和确认删除逻辑契约。
+- `main.py`：同步插件内部版本为 `1.0.1`。
+- `metadata.yaml`：发布版本提升为 `v1.0.1`。
+- `progress.md`：追加本轮根因、修复和验证记录。
+- 回滚方式：执行 `git revert <本轮修复提交哈希>` 后推送；回滚后将恢复原表格布局和原生确认弹窗行为。

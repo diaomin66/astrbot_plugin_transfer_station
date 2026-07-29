@@ -122,7 +122,21 @@ function renderCodes(data) {
       }
     });
     const deleteButton = createButton("删除", "button danger compact", async () => {
-      if (!window.confirm("确定删除这个尚未发放的兑换码吗？此操作不可撤销。")) return;
+      if (deleteButton.dataset.confirming !== "true") {
+        deleteButton.dataset.confirming = "true";
+        deleteButton.textContent = "确认删除";
+        deleteButton.classList.add("confirming");
+        deleteButton.title = "再次点击确认删除";
+        deleteButton._resetTimer = window.setTimeout(() => {
+          deleteButton.dataset.confirming = "false";
+          deleteButton.textContent = "删除";
+          deleteButton.classList.remove("confirming");
+          deleteButton.title = "";
+        }, 4000);
+        showToast("请再次点击“确认删除”完成操作。");
+        return;
+      }
+      window.clearTimeout(deleteButton._resetTimer);
       deleteButton.disabled = true;
       try {
         await apiPost("codes/delete", { id: item.id });

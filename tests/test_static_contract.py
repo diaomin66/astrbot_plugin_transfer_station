@@ -13,6 +13,7 @@ def test_metadata_and_config_contract():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
     assert metadata["name"] == "astrbot_plugin_transfer_station"
+    assert metadata["version"] == "v1.0.1"
     assert metadata["support_platforms"] == ["aiocqhttp"]
     assert metadata["astrbot_version"] == ">=4.16,<5"
     assert metadata["pages"][0]["name"] == "gift_codes"
@@ -28,10 +29,16 @@ def test_metadata_and_config_contract():
 def test_page_uses_bridge_and_safe_dynamic_text_rendering():
     html = (ROOT / "pages" / "gift_codes" / "index.html").read_text(encoding="utf-8")
     script = (ROOT / "pages" / "gift_codes" / "app.js").read_text(encoding="utf-8")
+    style = (ROOT / "pages" / "gift_codes" / "style.css").read_text(encoding="utf-8")
 
     assert "/api/plugin/page/bridge-sdk.js" in html
+    assert 'class="code-table"' in html
     assert "window.AstrBotPluginPage" in script
     assert "bridge.apiGet" in script
     assert "bridge.apiPost" in script
+    assert "确认删除" in script
+    assert "window.confirm" not in script
     assert ".textContent" in script
     assert ".innerHTML" not in script
+    assert ".code-cell {\n  display: flex" not in style
+    assert "table-layout: fixed" in style
