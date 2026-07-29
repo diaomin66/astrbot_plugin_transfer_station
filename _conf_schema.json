@@ -1,0 +1,32 @@
+{
+  "enabled": {
+    "description": "启用中转站机器人",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后不处理入群欢迎和新人礼领取。"
+  },
+  "enabled_group_ids": {
+    "description": "启用群白名单",
+    "type": "list",
+    "default": [],
+    "hint": "填写 QQ 群号；留空表示机器人所在的全部 QQ 群。"
+  },
+  "welcome_content": {
+    "description": "新人欢迎内容",
+    "type": "text",
+    "default": "欢迎加入本群！@机器人并发送“{claim_phrase}”即可领取新人礼。",
+    "hint": "支持 {claim_phrase} 占位符，会替换为当前领取口令。"
+  },
+  "claim_phrase": {
+    "description": "新人礼领取口令",
+    "type": "string",
+    "default": "领取新人礼",
+    "hint": "新人必须在群内 @机器人，并准确发送该口令。"
+  },
+  "mention_new_member": {
+    "description": "欢迎时 @新人",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，欢迎消息会先 @新入群成员。"
+  }
+}

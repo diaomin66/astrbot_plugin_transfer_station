@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>新人礼管理</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">TRANSFER STATION</p>
+          <h1>新人礼管理</h1>
+          <p class="subtitle">管理可发放兑换码，查看新人资格与领取记录。</p>
+        </div>
+        <button id="refreshButton" class="button secondary" type="button">刷新数据</button>
+      </header>
+
+      <section class="stats" aria-label="库存概览">
+        <article class="stat-card accent">
+          <span>可用兑换码</span>
+          <strong id="availableCodes">—</strong>
+        </article>
+        <article class="stat-card">
+          <span>已领取人数</span>
+          <strong id="claimedUsers">—</strong>
+        </article>
+        <article class="stat-card">
+          <span>待领取新人</span>
+          <strong id="pendingNewcomers">—</strong>
+        </article>
+        <article class="stat-card">
+          <span>资格记录</span>
+          <strong id="eligibleMembers">—</strong>
+        </article>
+      </section>
+
+      <section class="workspace">
+        <article class="panel import-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">IMPORT</p>
+              <h2>批量导入兑换码</h2>
+            </div>
+          </div>
+          <form id="importForm">
+            <label for="codeInput">每行一个兑换码</label>
+            <textarea
+              id="codeInput"
+              rows="9"
+              maxlength="1000000"
+              placeholder="WELCOME-001&#10;WELCOME-002&#10;WELCOME-003"
+            ></textarea>
+            <div class="form-footer">
+              <span>自动忽略空行、输入内重复项和库存重复项。</span>
+              <button id="importButton" class="button primary" type="submit">导入库存</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel policy-panel">
+          <p class="eyebrow">DELIVERY POLICY</p>
+          <h2>发放规则</h2>
+          <ul>
+            <li>仅插件记录到的本群新人可以领取。</li>
+            <li>同一 QQ 号在所有群中只能领取一次。</li>
+            <li>兑换码仅通过 QQ 群临时会话发送。</li>
+            <li>发送成功后立即删除；失败则退回库存。</li>
+          </ul>
+          <p class="warning">
+            网络超时可能造成 QQ 实际送达但本地回滚，请结合 NapCat 日志排查。
+          </p>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">INVENTORY</p>
+            <h2>可用兑换码</h2>
+          </div>
+          <span id="codeRange" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>兑换码</th>
+                <th>导入时间</th>
+                <th class="actions-column">操作</th>
+              </tr>
+            </thead>
+            <tbody id="codeRows"></tbody>
+          </table>
+          <p id="codeEmpty" class="empty" hidden>当前没有可用兑换码。</p>
+        </div>
+        <div class="pagination">
+          <button id="codePrev" class="button secondary compact" type="button">上一页</button>
+          <span id="codePage">第 1 页</span>
+          <button id="codeNext" class="button secondary compact" type="button">下一页</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">CLAIMS</p>
+            <h2>最近领取记录</h2>
+          </div>
+          <span id="claimRange" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>QQ</th>
+                <th>领取群</th>
+                <th>兑换码尾号</th>
+                <th>领取时间</th>
+              </tr>
+            </thead>
+            <tbody id="claimRows"></tbody>
+          </table>
+          <p id="claimEmpty" class="empty" hidden>还没有领取记录。</p>
+        </div>
+        <div class="pagination">
+          <button id="claimPrev" class="button secondary compact" type="button">上一页</button>
+          <span id="claimPage">第 1 页</span>
+          <button id="claimNext" class="button secondary compact" type="button">下一页</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
