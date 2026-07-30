@@ -9,6 +9,17 @@ from zoneinfo import ZoneInfo
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _DURATION_PATTERN = re.compile(r"^\+?(?P<value>\d+)(?P<unit>[smhd])$")
+MAX_DURATION_SECONDS = 10 * 365 * 86400
+MAX_DISPLAY_AMOUNT = Decimal(1000000000000)
+MAX_AMOUNT_DECIMAL_PLACES = 8
+MAX_WINNER_COUNT = 10000
+MAX_TOTAL_WINNERS = 10000
+MAX_PRIZE_COUNT = 100
+MAX_TITLE_LENGTH = 100
+MAX_DESCRIPTION_LENGTH = 2000
+MAX_KEYWORD_LENGTH = 50
+MAX_PRIZE_NAME_LENGTH = 80
+MAX_REASON_LENGTH = 300
 
 
 def utc_now() -> datetime:
@@ -37,6 +48,8 @@ def parse_duration(value: str) -> timedelta:
         raise ValueError("时长必须大于 0")
     unit = match.group("unit")
     seconds = amount * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    if seconds > MAX_DURATION_SECONDS:
+        raise ValueError("时长不能超过 10 年")
     return timedelta(seconds=seconds)
 
 
@@ -73,6 +86,11 @@ def parse_positive_decimal(value: str) -> Decimal:
         raise ValueError("额度必须是有效数字") from exc
     if not amount.is_finite() or amount <= 0:
         raise ValueError("额度必须大于 0")
+    if amount > MAX_DISPLAY_AMOUNT:
+        raise ValueError("额度不能超过 1000000000000")
+    decimal_places = max(0, -amount.as_tuple().exponent)
+    if decimal_places > MAX_AMOUNT_DECIMAL_PLACES:
+        raise ValueError(f"额度最多保留 {MAX_AMOUNT_DECIMAL_PLACES} 位小数")
     return amount
 
 
@@ -87,8 +105,33 @@ def new_serial(prefix: str) -> str:
     return f"{prefix}{stamp}{secrets.token_hex(3).upper()}"
 
 
+def validate_text(
+    value: str,
+    *,
+    label: str,
+    maximum: int,
+    allow_empty: bool = False,
+) -> str:
+    normalized = str(value).strip()
+    if not normalized and not allow_empty:
+        raise ValueError(f"{label}不能为空")
+    if len(normalized) > maximum:
+        raise ValueError(f"{label}不能超过 {maximum} 个字符")
+    return normalized
+
+
+def is_reserved_lottery_keyword(keyword: str, claim_phrase: str) -> bool:
+    normalized = str(keyword).strip()
+    return (
+        normalized == str(claim_phrase).strip()
+        or normalized in {"确认 抽奖", "取消 抽奖", "确认 补偿", "取消 补偿"}
+        or re.fullmatch(r"(?:抽奖|补偿)\s+\d+", normalized) is not None
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ActionResult:
     key: str
     placeholders: dict[str, str] = field(default_factory=dict)
     stop: bool = True
+    should_announce: bool = True

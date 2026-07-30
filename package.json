@@ -1,0 +1,11 @@
+{
+  "name": "astrbot-plugin-transfer-station-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:pages": "node --test tests/js/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}

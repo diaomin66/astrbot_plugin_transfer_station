@@ -7,7 +7,7 @@ repo: https://github.com/diaomin66/astrbot_plugin_transfer_station
 entry: main.py
 support_platforms:
   - aiocqhttp
-astrbot_version: ">=4.16,<5"
+astrbot_version: ">=4.26,<5"
 pages:
   - name: gift_codes
     title: 新人礼管理

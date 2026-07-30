@@ -7,6 +7,8 @@ const state = {
   codeHasMore: false,
   claimPage: 1,
   claimHasMore: false,
+  reviewPage: 1,
+  reviewHasMore: false,
 };
 
 const elements = {
@@ -16,6 +18,7 @@ const elements = {
   eligibleMembers: document.getElementById("eligibleMembers"),
   knownUsers: document.getElementById("knownUsers"),
   todayNewcomers: document.getElementById("todayNewcomers"),
+  giftManualReviews: document.getElementById("giftManualReviews"),
   refreshButton: document.getElementById("refreshButton"),
   importForm: document.getElementById("importForm"),
   importButton: document.getElementById("importButton"),
@@ -32,6 +35,12 @@ const elements = {
   claimPrev: document.getElementById("claimPrev"),
   claimNext: document.getElementById("claimNext"),
   claimPage: document.getElementById("claimPage"),
+  reviewRows: document.getElementById("reviewRows"),
+  reviewEmpty: document.getElementById("reviewEmpty"),
+  reviewRange: document.getElementById("reviewRange"),
+  reviewPrev: document.getElementById("reviewPrev"),
+  reviewNext: document.getElementById("reviewNext"),
+  reviewPage: document.getElementById("reviewPage"),
   toast: document.getElementById("toast"),
 };
 
@@ -87,6 +96,7 @@ async function loadSummary() {
   elements.eligibleMembers.textContent = String(data.eligible_members ?? 0);
   elements.knownUsers.textContent = String(data.known_users ?? 0);
   elements.todayNewcomers.textContent = String(data.today_newcomers ?? 0);
+  elements.giftManualReviews.textContent = String(data.gift_manual_reviews ?? 0);
 }
 
 function renderCodes(data) {
@@ -221,10 +231,100 @@ async function loadClaims() {
   renderClaims(data);
 }
 
+async function resolveGiftReview(item, delivered, button) {
+  button.disabled = true;
+  try {
+    const result = await apiPost("gift-reviews/resolve", {
+      id: item.id,
+      delivered,
+    });
+    showToast(result.message, "success");
+    await Promise.all([loadSummary(), loadCodes(), loadClaims(), loadGiftReviews()]);
+  } catch (error) {
+    showToast(error.message || "核查处理失败。", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderGiftReviews(data) {
+  elements.reviewRows.replaceChildren();
+  const items = Array.isArray(data.items) ? data.items : [];
+  for (const item of items) {
+    const row = document.createElement("tr");
+    const identity = document.createElement("td");
+    const qq = document.createElement("strong");
+    qq.textContent = `QQ ${item.user_id}`;
+    const group = document.createElement("small");
+    group.textContent = `群 ${item.group_id}`;
+    identity.append(qq, group);
+
+    const suffix = document.createElement("td");
+    suffix.textContent = item.code_suffix ? `••••${item.code_suffix}` : "—";
+    const error = document.createElement("td");
+    error.textContent = item.error_type || "未知异常";
+    const updated = document.createElement("td");
+    updated.textContent = formatTime(item.updated_at);
+    const action = document.createElement("td");
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
+    const delivered = createButton(
+      "确认送达",
+      "button secondary compact",
+      async () => {
+        await resolveGiftReview(item, true, delivered);
+      },
+    );
+    const released = createButton(
+      "确认未送达",
+      "button danger compact",
+      async () => {
+        if (released.dataset.confirming !== "true") {
+          released.dataset.confirming = "true";
+          released.textContent = "再次点击退回";
+          window.setTimeout(() => {
+            released.dataset.confirming = "false";
+            released.textContent = "确认未送达";
+          }, 4000);
+          return;
+        }
+        await resolveGiftReview(item, false, released);
+      },
+    );
+    actions.append(delivered, released);
+    action.append(actions);
+    row.append(identity, suffix, error, updated, action);
+    elements.reviewRows.append(row);
+  }
+  elements.reviewEmpty.hidden = items.length !== 0;
+  state.reviewHasMore = Boolean(data.has_more);
+  elements.reviewPrev.disabled = state.reviewPage <= 1;
+  elements.reviewNext.disabled = !state.reviewHasMore;
+  elements.reviewPage.textContent = `第 ${state.reviewPage} 页`;
+  const start = data.total ? (state.reviewPage - 1) * PAGE_SIZE + 1 : 0;
+  const end = Math.min(state.reviewPage * PAGE_SIZE, Number(data.total || 0));
+  elements.reviewRange.textContent = `${start}–${end} / ${data.total || 0}`;
+}
+
+async function loadGiftReviews() {
+  const data = await apiGet("gift-reviews", {
+    page: state.reviewPage,
+    page_size: PAGE_SIZE,
+  });
+  if (
+    state.reviewPage > 1 &&
+    Number(data.total || 0) <= (state.reviewPage - 1) * PAGE_SIZE
+  ) {
+    state.reviewPage -= 1;
+    return loadGiftReviews();
+  }
+  renderGiftReviews(data);
+}
+
 async function refreshAll() {
   elements.refreshButton.disabled = true;
   try {
-    await Promise.all([loadSummary(), loadCodes(), loadClaims()]);
+    await Promise.all([loadSummary(), loadCodes(), loadClaims(), loadGiftReviews()]);
   } catch (error) {
     showToast(error.message || "读取后台数据失败。", "error");
   } finally {
@@ -277,6 +377,16 @@ function bindEvents() {
     if (!state.claimHasMore) return;
     state.claimPage += 1;
     await loadClaims();
+  });
+  elements.reviewPrev.addEventListener("click", async () => {
+    if (state.reviewPage <= 1) return;
+    state.reviewPage -= 1;
+    await loadGiftReviews();
+  });
+  elements.reviewNext.addEventListener("click", async () => {
+    if (!state.reviewHasMore) return;
+    state.reviewPage += 1;
+    await loadGiftReviews();
   });
 }
 

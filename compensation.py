@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -8,10 +9,13 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 import aiosqlite
 
 from .campaign_utils import (
+    MAX_REASON_LENGTH,
+    MAX_TITLE_LENGTH,
     ActionResult,
     decimal_text,
     format_shanghai,
@@ -19,30 +23,51 @@ from .campaign_utils import (
     new_serial,
     to_iso,
     utc_now,
+    validate_text,
 )
 from .newapi_client import NewApiClient, NewApiError, NewApiUser, QuotaSnapshot
 
-COMPENSATION_SCHEMA_VERSION = 1
+COMPENSATION_SCHEMA_VERSION = 3
+MAX_LOOKUP_ATTEMPTS_PER_USER = 5
+NOTIFICATION_LEASE_SECONDS = 60
 ACTIVE_STATES = ("open",)
+_SHARED_INIT_LOCKS: WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[str, asyncio.Lock],
+] = WeakKeyDictionary()
+
+
+def _shared_init_lock(path: Path) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    key = str(path.resolve()).casefold()
+    locks = _SHARED_INIT_LOCKS.setdefault(loop, {})
+    return locks.setdefault(key, asyncio.Lock())
 
 
 class CompensationStorage:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._initialized = False
 
     async def initialize(self) -> None:
         if self._initialized:
             return
-        async with self._init_lock:
+        async with _shared_init_lock(self.db_path):
             if self._initialized:
                 return
             async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("PRAGMA busy_timeout=5000")
                 await db.execute("PRAGMA journal_mode=WAL")
                 await db.execute("PRAGMA foreign_keys=ON")
+                version_cursor = await db.execute("PRAGMA user_version")
+                version_row = await version_cursor.fetchone()
+                current_version = int(version_row[0]) if version_row else 0
+                if current_version > COMPENSATION_SCHEMA_VERSION:
+                    raise RuntimeError(
+                        "compensation.db 版本高于当前插件支持版本，拒绝降级打开"
+                    )
                 await db.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS schema_meta (
@@ -94,6 +119,31 @@ class CompensationStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_comp_claims_status
                     ON compensation_claims(activity_id, status);
+
+                    CREATE TABLE IF NOT EXISTS compensation_lookup_attempts (
+                        activity_id INTEGER NOT NULL
+                            REFERENCES compensation_activities(id) ON DELETE CASCADE,
+                        qq_id TEXT NOT NULL,
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(activity_id, qq_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS compensation_notifications (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        activity_id INTEGER NOT NULL
+                            REFERENCES compensation_activities(id) ON DELETE CASCADE,
+                        group_id TEXT NOT NULL,
+                        event_key TEXT NOT NULL,
+                        placeholders_json TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(activity_id, event_key)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_comp_notification_status
+                    ON compensation_notifications(status, id);
                     """
                 )
                 await db.execute(
@@ -119,6 +169,173 @@ class CompensationStorage:
     @staticmethod
     def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
+
+    @staticmethod
+    async def _enqueue_notification(
+        db: aiosqlite.Connection,
+        activity_id: int,
+        group_id: str,
+        event_key: str,
+        placeholders: dict[str, Any],
+        *,
+        now: datetime,
+        supersede_pending: bool = False,
+    ) -> None:
+        if supersede_pending:
+            await db.execute(
+                """
+                UPDATE compensation_notifications
+                SET status = 'superseded', updated_at = ?
+                WHERE activity_id = ? AND status = 'pending'
+                """,
+                (to_iso(now), int(activity_id)),
+            )
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO compensation_notifications(
+                activity_id, group_id, event_key, placeholders_json,
+                status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'pending', ?, ?)
+            """,
+            (
+                int(activity_id),
+                str(group_id),
+                event_key,
+                json.dumps(placeholders, ensure_ascii=False, separators=(",", ":")),
+                to_iso(now),
+                to_iso(now),
+            ),
+        )
+
+    async def claim_notification(
+        self,
+        activity_id: int,
+        event_key: str,
+    ) -> dict[str, Any] | None:
+        now = utc_now()
+        marker = to_iso(now)
+        stale_before = to_iso(now - timedelta(seconds=NOTIFICATION_LEASE_SECONDS))
+        async with self._write_lock, self._connection() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                """
+                UPDATE compensation_notifications
+                SET status = 'pending', updated_at = ?
+                WHERE status = 'sending' AND updated_at <= ?
+                """,
+                (marker, stale_before),
+            )
+            cursor = await db.execute(
+                """
+                SELECT id, activity_id, group_id, event_key, placeholders_json
+                FROM compensation_notifications AS current
+                WHERE current.activity_id = ?
+                  AND current.event_key = ?
+                  AND current.status = 'pending'
+                  AND current.id = (
+                    SELECT MIN(queued.id)
+                    FROM compensation_notifications AS queued
+                    WHERE queued.activity_id = current.activity_id
+                      AND queued.status = 'pending'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM compensation_notifications AS active
+                    WHERE active.activity_id = current.activity_id
+                      AND active.status = 'sending'
+                  )
+                LIMIT 1
+                """,
+                (int(activity_id), str(event_key)),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                await db.commit()
+                return None
+            cursor = await db.execute(
+                """
+                UPDATE compensation_notifications
+                SET status = 'sending', updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (marker, int(row["id"])),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return None
+            await db.commit()
+        result = dict(row)
+        result["placeholders"] = json.loads(result.pop("placeholders_json"))
+        result["lease_marker"] = marker
+        return result
+
+    async def list_pending_notifications(self, limit: int = 50) -> list[dict[str, Any]]:
+        now = utc_now()
+        marker = to_iso(now)
+        stale_before = to_iso(now - timedelta(seconds=NOTIFICATION_LEASE_SECONDS))
+        async with self._write_lock, self._connection() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                """
+                UPDATE compensation_notifications
+                SET status = 'pending', updated_at = ?
+                WHERE status = 'sending' AND updated_at <= ?
+                """,
+                (marker, stale_before),
+            )
+            cursor = await db.execute(
+                """
+                SELECT id, activity_id, group_id, event_key, placeholders_json
+                FROM compensation_notifications
+                WHERE status = 'pending'
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (min(100, max(1, int(limit))),),
+            )
+            rows = await cursor.fetchall()
+            await db.commit()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["placeholders"] = json.loads(item.pop("placeholders_json"))
+            result.append(item)
+        return result
+
+    async def mark_notification_sent(
+        self,
+        notification_id: int,
+        lease_marker: str,
+    ) -> bool:
+        async with self._write_lock, self._connection() as db:
+            cursor = await db.execute(
+                """
+                UPDATE compensation_notifications
+                SET status = 'sent', updated_at = ?
+                WHERE id = ? AND status = 'sending' AND updated_at = ?
+                """,
+                (to_iso(utc_now()), int(notification_id), str(lease_marker)),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def release_notification(
+        self,
+        notification_id: int,
+        lease_marker: str,
+    ) -> bool:
+        async with self._write_lock, self._connection() as db:
+            cursor = await db.execute(
+                """
+                UPDATE compensation_notifications
+                SET status = 'pending', updated_at = ?
+                WHERE id = ? AND status = 'sending' AND updated_at = ?
+                """,
+                (to_iso(utc_now()), int(notification_id), str(lease_marker)),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
 
     async def _active(
         self,
@@ -197,6 +414,24 @@ class CompensationStorage:
                 ),
             )
             activity_id = int(cursor.lastrowid)
+            await self._enqueue_notification(
+                db,
+                activity_id,
+                str(group_id),
+                "comp_opened",
+                {
+                    "activity_id": str(activity_id),
+                    "title": title,
+                    "amount": snapshot.display_amount(amount),
+                    "end_time": format_shanghai(end_at),
+                    "total_budget": (
+                        snapshot.display_amount(total_amount)
+                        if total_amount is not None
+                        else "不限制"
+                    ),
+                },
+                now=now,
+            )
             await db.commit()
         activity = await self.get(activity_id)
         assert activity is not None
@@ -216,6 +451,7 @@ class CompensationStorage:
         reason: str,
         *,
         now: datetime,
+        expected_activity_id: int | None = None,
     ) -> dict[str, Any] | None:
         async with self._write_lock, self._connection() as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -223,6 +459,11 @@ class CompensationStorage:
             if not activity:
                 await db.rollback()
                 return None
+            if expected_activity_id is not None and int(activity["id"]) != int(
+                expected_activity_id
+            ):
+                await db.rollback()
+                raise ValueError("stale_activity")
             await db.execute(
                 """
                 UPDATE compensation_activities
@@ -238,6 +479,19 @@ class CompensationStorage:
                 WHERE activity_id = ? AND status = 'pending_confirmation'
                 """,
                 (to_iso(now), int(activity["id"])),
+            )
+            await self._enqueue_notification(
+                db,
+                int(activity["id"]),
+                str(activity["group_id"]),
+                "comp_closed",
+                {
+                    "activity_id": str(activity["id"]),
+                    "title": activity["title"],
+                    "reason": reason or "-",
+                },
+                now=now,
+                supersede_pending=True,
             )
             await db.commit()
             return activity
@@ -304,6 +558,77 @@ class CompensationStorage:
                 "api_username": user.username,
                 "confirmation_expires_at": to_iso(expires),
             }
+
+    async def submission_state(
+        self,
+        group_id: str,
+        qq_id: str,
+        *,
+        now: datetime,
+    ) -> str:
+        async with self._connection() as db:
+            activity = await self._active(db, group_id)
+            if not activity:
+                return "no_active"
+            if activity["end_at"] and now >= from_iso(activity["end_at"]):
+                return "ended"
+            cursor = await db.execute(
+                """
+                SELECT status
+                FROM compensation_claims
+                WHERE activity_id = ? AND qq_id = ?
+                  AND status IN (
+                    'pending_confirmation', 'processing', 'paid', 'manual_review'
+                  )
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(activity["id"]), str(qq_id)),
+            )
+            existing = await cursor.fetchone()
+            return "duplicate" if existing else "eligible"
+
+    async def consume_lookup_attempt(
+        self,
+        group_id: str,
+        qq_id: str,
+        *,
+        now: datetime,
+    ) -> bool:
+        async with self._write_lock, self._connection() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            activity = await self._active(db, group_id)
+            if not activity or activity["status"] != "open":
+                await db.rollback()
+                return False
+            if activity["end_at"] and now >= from_iso(activity["end_at"]):
+                await db.rollback()
+                return False
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO compensation_lookup_attempts(
+                    activity_id, qq_id, attempt_count, updated_at
+                )
+                VALUES (?, ?, 0, ?)
+                """,
+                (int(activity["id"]), str(qq_id), to_iso(now)),
+            )
+            cursor = await db.execute(
+                """
+                UPDATE compensation_lookup_attempts
+                SET attempt_count = attempt_count + 1, updated_at = ?
+                WHERE activity_id = ? AND qq_id = ?
+                  AND attempt_count < ?
+                """,
+                (
+                    to_iso(now),
+                    int(activity["id"]),
+                    str(qq_id),
+                    MAX_LOOKUP_ATTEMPTS_PER_USER,
+                ),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
 
     async def reserve(
         self,
@@ -392,6 +717,18 @@ class CompensationStorage:
                             """,
                             (to_iso(now), int(claim["activity_id"])),
                         )
+                        await self._enqueue_notification(
+                            db,
+                            int(claim["activity_id"]),
+                            str(group_id),
+                            "comp_budget_closed",
+                            {
+                                "activity_id": str(claim["activity_id"]),
+                                "title": claim["title"],
+                            },
+                            now=now,
+                            supersede_pending=True,
+                        )
                         await db.commit()
                         raise ValueError("budget_insufficient")
                     await db.rollback()
@@ -416,7 +753,7 @@ class CompensationStorage:
         *,
         error_type: str = "",
         now: datetime,
-    ) -> None:
+    ) -> bool:
         if status not in {"paid", "failed", "manual_review"}:
             raise ValueError("invalid_status")
         async with self._write_lock, self._connection() as db:
@@ -431,7 +768,7 @@ class CompensationStorage:
             claim = await cursor.fetchone()
             if not claim:
                 await db.rollback()
-                return
+                return False
             await db.execute(
                 """
                 UPDATE compensation_claims
@@ -443,7 +780,7 @@ class CompensationStorage:
             if status == "paid":
                 cursor = await db.execute(
                     """
-                    SELECT total_raw_quota, per_raw_quota
+                    SELECT total_raw_quota, per_raw_quota, group_id, title
                     FROM compensation_activities
                     WHERE id = ? AND status = 'open'
                     """,
@@ -474,6 +811,18 @@ class CompensationStorage:
                             """,
                             (to_iso(now), int(claim["activity_id"])),
                         )
+                        await self._enqueue_notification(
+                            db,
+                            int(claim["activity_id"]),
+                            str(activity["group_id"]),
+                            "comp_budget_closed",
+                            {
+                                "activity_id": str(claim["activity_id"]),
+                                "title": activity["title"],
+                            },
+                            now=now,
+                            supersede_pending=True,
+                        )
                         await db.execute(
                             """
                             UPDATE compensation_claims
@@ -484,6 +833,7 @@ class CompensationStorage:
                             (to_iso(now), int(claim["activity_id"])),
                         )
             await db.commit()
+            return True
 
     async def cancel_pending(self, group_id: str, qq_id: str) -> bool:
         async with self._write_lock, self._connection() as db:
@@ -513,18 +863,26 @@ class CompensationStorage:
         success: bool,
         *,
         now: datetime,
+        activity_id: int | None = None,
     ) -> dict[str, Any] | None:
         async with self._write_lock, self._connection() as db:
             await db.execute("BEGIN IMMEDIATE")
+            activity_filter = "AND ca.id = ?" if activity_id is not None else ""
+            params: tuple[Any, ...] = (
+                (serial, str(group_id), int(activity_id))
+                if activity_id is not None
+                else (serial, str(group_id))
+            )
             cursor = await db.execute(
-                """
+                f"""
                 SELECT cc.*
                 FROM compensation_claims AS cc
                 JOIN compensation_activities AS ca ON ca.id = cc.activity_id
                 WHERE cc.serial = ? AND cc.status = 'manual_review'
                   AND ca.group_id = ?
+                  {activity_filter}
                 """,
-                (serial, str(group_id)),
+                params,
             )
             claim = self._dict(await cursor.fetchone())
             if not claim:
@@ -542,7 +900,7 @@ class CompensationStorage:
             if success:
                 cursor = await db.execute(
                     """
-                    SELECT total_raw_quota, per_raw_quota
+                    SELECT total_raw_quota, per_raw_quota, group_id, title
                     FROM compensation_activities
                     WHERE id = ? AND status = 'open'
                     """,
@@ -573,6 +931,18 @@ class CompensationStorage:
                             """,
                             (to_iso(now), int(claim["activity_id"])),
                         )
+                        await self._enqueue_notification(
+                            db,
+                            int(claim["activity_id"]),
+                            str(activity["group_id"]),
+                            "comp_budget_closed",
+                            {
+                                "activity_id": str(claim["activity_id"]),
+                                "title": activity["title"],
+                            },
+                            now=now,
+                            supersede_pending=True,
+                        )
                         await db.execute(
                             """
                             UPDATE compensation_claims
@@ -586,7 +956,13 @@ class CompensationStorage:
             claim["status"] = status
             return claim
 
-    async def recover_processing(self, *, now: datetime) -> int:
+    async def recover_processing(
+        self,
+        *,
+        now: datetime,
+        stale_before: datetime | None = None,
+    ) -> int:
+        cutoff = to_iso(stale_before or now)
         async with self._write_lock, self._connection() as db:
             await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
@@ -594,9 +970,9 @@ class CompensationStorage:
                 UPDATE compensation_claims
                 SET status = 'manual_review', updated_at = ?,
                     error_type = 'ProcessRestarted'
-                WHERE status = 'processing'
+                WHERE status = 'processing' AND updated_at <= ?
                 """,
-                (to_iso(now),),
+                (to_iso(now), cutoff),
             )
             await db.commit()
             return cursor.rowcount
@@ -641,14 +1017,43 @@ class CompensationStorage:
                     """,
                     (now_iso, int(activity["id"])),
                 )
+                await self._enqueue_notification(
+                    db,
+                    int(activity["id"]),
+                    str(activity["group_id"]),
+                    "comp_auto_closed",
+                    {
+                        "activity_id": str(activity["id"]),
+                        "title": activity["title"],
+                    },
+                    now=now,
+                    supersede_pending=True,
+                )
             await db.commit()
         return closed
 
-    async def page(self, group_id: str, page: int, page_size: int = 20) -> dict:
+    async def page(
+        self,
+        group_id: str,
+        page: int,
+        page_size: int = 20,
+        *,
+        activity_id: int | None = None,
+    ) -> dict:
         page = max(1, int(page))
         async with self._connection() as db:
-            activity = await self._active(db, group_id)
-            if not activity:
+            if activity_id is None:
+                activity = await self._active(db, group_id)
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM compensation_activities
+                    WHERE id = ? AND group_id = ?
+                    """,
+                    (int(activity_id), str(group_id)),
+                )
+                activity = self._dict(await cursor.fetchone())
+            if activity_id is None and not activity:
                 cursor = await db.execute(
                     """
                     SELECT * FROM compensation_activities
@@ -730,13 +1135,21 @@ class CompensationService:
     ) -> ActionResult:
         if duration is None and total_amount is None:
             return ActionResult("comp_invalid_argument")
+        try:
+            title = validate_text(
+                title or "服务异常补偿",
+                label="补偿标题",
+                maximum=MAX_TITLE_LENGTH,
+            )
+        except ValueError:
+            return ActionResult("comp_invalid_argument")
         if self.newapi is None:
-            return ActionResult("newapi_error", {"error": "尚未配置 New API"})
+            return ActionResult("newapi_error")
         try:
             snapshot = await self.newapi.status_snapshot()
             activity = await self.storage.open_activity(
                 group_id,
-                title.strip() or "服务异常补偿",
+                title,
                 admin_id,
                 per_amount,
                 int(duration.total_seconds()) if duration else None,
@@ -744,8 +1157,8 @@ class CompensationService:
                 snapshot,
                 now=utc_now(),
             )
-        except NewApiError as exc:
-            return ActionResult("newapi_error", {"error": str(exc)})
+        except NewApiError:
+            return ActionResult("newapi_error")
         except ValueError as exc:
             key = (
                 "comp_active_exists"
@@ -776,7 +1189,11 @@ class CompensationService:
         if not activity:
             return ActionResult("comp_no_active")
         snap = self._snapshot(activity)
-        page = await self.storage.page(group_id, 1)
+        page = await self.storage.page(
+            group_id,
+            1,
+            activity_id=int(activity["id"]),
+        )
         total = activity["total_raw_quota"]
         used = int(page["used_raw_quota"])
         remaining_display = "不限制"
@@ -830,17 +1247,36 @@ class CompensationService:
         api_user_id: str,
     ) -> ActionResult:
         if self.newapi is None:
-            return ActionResult("newapi_error", {"error": "尚未配置 New API"})
+            return ActionResult("newapi_error")
+        current = utc_now()
+        local_state = await self.storage.submission_state(
+            group_id,
+            qq_id,
+            now=current,
+        )
+        if local_state != "eligible":
+            mapping = {
+                "no_active": "comp_no_active",
+                "ended": "comp_ended",
+                "duplicate": "comp_duplicate",
+            }
+            return ActionResult(mapping.get(local_state, "comp_invalid_argument"))
+        if not await self.storage.consume_lookup_attempt(
+            group_id,
+            qq_id,
+            now=current,
+        ):
+            return ActionResult("campaign_rate_limited")
         try:
             user = await self.newapi.get_user(api_user_id)
             claim = await self.storage.create_pending(
                 group_id,
                 qq_id,
                 user,
-                now=utc_now(),
+                now=current,
             )
-        except NewApiError as exc:
-            return ActionResult("newapi_user_error", {"error": str(exc)})
+        except NewApiError:
+            return ActionResult("newapi_user_error")
         except ValueError as exc:
             mapping = {
                 "no_active": "comp_no_active",
@@ -863,7 +1299,7 @@ class CompensationService:
 
     async def confirm(self, group_id: str, qq_id: str) -> ActionResult:
         if self.newapi is None:
-            return ActionResult("newapi_error", {"error": "尚未配置 New API"})
+            return ActionResult("newapi_error")
         try:
             claim = await self.storage.reserve(group_id, qq_id, now=utc_now())
         except ValueError as exc:
@@ -879,21 +1315,56 @@ class CompensationService:
                 int(claim["api_user_id"]),
                 int(claim["raw_quota"]),
             )
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self.storage.finish(
+                    claim["serial"],
+                    "manual_review",
+                    error_type="CancelledError",
+                    now=utc_now(),
+                )
+            )
+            raise
         except NewApiError as exc:
             status = "manual_review" if exc.ambiguous else "failed"
-            await self.storage.finish(
+            finished = await self.storage.finish(
                 claim["serial"],
                 status,
                 error_type=type(exc).__name__,
                 now=utc_now(),
             )
+            if not finished:
+                return ActionResult(
+                    "comp_manual_review",
+                    {"serial": claim["serial"]},
+                )
             if exc.ambiguous:
                 return ActionResult(
                     "comp_manual_review",
                     {"serial": claim["serial"]},
                 )
-            return ActionResult("comp_payout_failed", {"error": str(exc)})
-        await self.storage.finish(claim["serial"], "paid", now=utc_now())
+            return ActionResult("comp_payout_failed")
+        except Exception as exc:  # noqa: BLE001 - New API client boundary
+            await self.storage.finish(
+                claim["serial"],
+                "manual_review",
+                error_type=type(exc).__name__,
+                now=utc_now(),
+            )
+            return ActionResult(
+                "comp_manual_review",
+                {"serial": claim["serial"]},
+            )
+        finished = await self.storage.finish(
+            claim["serial"],
+            "paid",
+            now=utc_now(),
+        )
+        if not finished:
+            return ActionResult(
+                "comp_manual_review",
+                {"serial": claim["serial"]},
+            )
         snapshot = self._snapshot(claim)
         return ActionResult(
             "comp_paid",
@@ -913,8 +1384,31 @@ class CompensationService:
             else "comp_no_confirmation"
         )
 
-    async def close(self, group_id: str, reason: str) -> ActionResult:
-        activity = await self.storage.close(group_id, reason, now=utc_now())
+    async def close(
+        self,
+        group_id: str,
+        reason: str,
+        *,
+        expected_activity_id: int | None = None,
+    ) -> ActionResult:
+        try:
+            reason = validate_text(
+                reason,
+                label="关闭原因",
+                maximum=MAX_REASON_LENGTH,
+                allow_empty=True,
+            )
+        except ValueError:
+            return ActionResult("comp_invalid_argument")
+        try:
+            activity = await self.storage.close(
+                group_id,
+                reason,
+                now=utc_now(),
+                expected_activity_id=expected_activity_id,
+            )
+        except ValueError:
+            return ActionResult("comp_no_active")
         if not activity:
             return ActionResult("comp_no_active")
         return ActionResult(
@@ -931,12 +1425,15 @@ class CompensationService:
         group_id: str,
         serial: str,
         success: bool,
+        *,
+        activity_id: int | None = None,
     ) -> ActionResult:
         claim = await self.storage.review(
             group_id,
             serial,
             success,
             now=utc_now(),
+            activity_id=activity_id,
         )
         if not claim:
             return ActionResult("comp_review_not_found")

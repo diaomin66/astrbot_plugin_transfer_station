@@ -8,10 +8,23 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
 import aiosqlite
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+MAX_IMPORT_CODES = 10000
+_SHARED_INIT_LOCKS: WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[str, asyncio.Lock],
+] = WeakKeyDictionary()
+
+
+def _shared_init_lock(path: Path) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    key = str(path.resolve()).casefold()
+    locks = _SHARED_INIT_LOCKS.setdefault(loop, {})
+    return locks.setdefault(key, asyncio.Lock())
 
 
 def utc_now() -> str:
@@ -26,6 +39,15 @@ def code_suffix(code: str) -> str:
     return code[-4:] if len(code) > 4 else code
 
 
+def is_clear_delivery_failure(exc: Exception) -> bool:
+    if getattr(exc, "retcode", None) is not None:
+        return True
+    return type(exc).__name__ in {
+        "ActionFailed",
+        "Unauthorized",
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ClaimOutcome:
     status: str
@@ -38,19 +60,26 @@ class GiftStorage:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._initialized = False
 
     async def initialize(self) -> None:
         if self._initialized:
             return
-        async with self._init_lock:
+        async with _shared_init_lock(self.db_path):
             if self._initialized:
                 return
             async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("PRAGMA busy_timeout=5000")
                 await db.execute("PRAGMA journal_mode=WAL")
                 await db.execute("PRAGMA foreign_keys=ON")
+                version_cursor = await db.execute("PRAGMA user_version")
+                version_row = await version_cursor.fetchone()
+                current_version = int(version_row[0]) if version_row else 0
+                if current_version > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        "gifts.db 版本高于当前插件支持版本，拒绝降级打开"
+                    )
                 await db.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS schema_meta (
@@ -95,26 +124,44 @@ class GiftStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_known_users_source_seen
                     ON known_users(source, first_seen_at);
+
+                    CREATE TABLE IF NOT EXISTS gift_reservations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        code_id INTEGER NOT NULL UNIQUE
+                            REFERENCES gift_codes(id) ON DELETE CASCADE,
+                        user_id TEXT NOT NULL UNIQUE,
+                        group_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        reserved_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        error_type TEXT NOT NULL DEFAULT ''
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_gift_reservation_status
+                    ON gift_reservations(status, updated_at);
                     """
                 )
-                await db.execute(
-                    """
-                    INSERT OR IGNORE INTO known_users(
-                        user_id, first_group_id, first_seen_at, source, eligible_group_id
+                if current_version < 2:
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO known_users(
+                            user_id, first_group_id, first_seen_at,
+                            source, eligible_group_id
+                        )
+                        SELECT user_id, group_id, claimed_at, 'claimed', NULL
+                        FROM claims
+                        """
                     )
-                    SELECT user_id, group_id, claimed_at, 'claimed', NULL
-                    FROM claims
-                    """
-                )
-                await db.execute(
-                    """
-                    INSERT OR IGNORE INTO known_users(
-                        user_id, first_group_id, first_seen_at, source, eligible_group_id
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO known_users(
+                            user_id, first_group_id, first_seen_at,
+                            source, eligible_group_id
+                        )
+                        SELECT user_id, group_id, joined_at, 'legacy', NULL
+                        FROM eligible_members
+                        """
                     )
-                    SELECT user_id, group_id, joined_at, 'legacy', NULL
-                    FROM eligible_members
-                    """
-                )
                 await db.execute(
                     """
                     INSERT INTO schema_meta(key, value)
@@ -287,16 +334,18 @@ class GiftStorage:
             normalized.append(code)
 
         inserted = 0
+        if len(normalized) > MAX_IMPORT_CODES:
+            raise ValueError(f"单次最多导入 {MAX_IMPORT_CODES} 个兑换码")
         async with self._write_lock, self._connection() as db:
-            for code in normalized:
-                cursor = await db.execute(
-                    """
-                    INSERT OR IGNORE INTO gift_codes(code, created_at)
-                    VALUES (?, ?)
-                    """,
-                    (code, utc_now()),
-                )
-                inserted += cursor.rowcount
+            before = db.total_changes
+            await db.executemany(
+                """
+                INSERT OR IGNORE INTO gift_codes(code, created_at)
+                VALUES (?, ?)
+                """,
+                [(code, utc_now()) for code in normalized],
+            )
+            inserted = db.total_changes - before
             await db.commit()
         return {
             "received": submitted,
@@ -309,21 +358,30 @@ class GiftStorage:
         page_size = min(100, max(1, int(page_size)))
         offset = (page - 1) * page_size
         async with self._connection() as db:
-            total_cursor = await db.execute("SELECT COUNT(*) AS total FROM gift_codes")
+            total_cursor = await db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM gift_codes AS gc
+                LEFT JOIN gift_reservations AS gr ON gr.code_id = gc.id
+                WHERE gr.id IS NULL
+                """
+            )
             total_row = await total_cursor.fetchone()
             total = int(total_row["total"]) if total_row else 0
             cursor = await db.execute(
                 """
-                SELECT id, code, created_at
-                FROM gift_codes
-                ORDER BY id ASC
+                SELECT gc.id, gc.code, gc.created_at
+                FROM gift_codes AS gc
+                LEFT JOIN gift_reservations AS gr ON gr.code_id = gc.id
+                WHERE gr.id IS NULL
+                ORDER BY gc.id ASC
                 LIMIT ? OFFSET ?
                 """,
                 (page_size, offset),
             )
             rows = await cursor.fetchall()
         return {
-            "items": [dict(row) for row in rows],
+            "items": [{**dict(row), "id": str(row["id"])} for row in rows],
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -333,7 +391,14 @@ class GiftStorage:
     async def delete_code(self, code_id: int) -> bool:
         async with self._write_lock, self._connection() as db:
             cursor = await db.execute(
-                "DELETE FROM gift_codes WHERE id = ?",
+                """
+                DELETE FROM gift_codes
+                WHERE id = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM gift_reservations
+                    WHERE gift_reservations.code_id = gift_codes.id
+                  )
+                """,
                 (int(code_id),),
             )
             await db.commit()
@@ -368,7 +433,17 @@ class GiftStorage:
     async def summary(self) -> dict[str, int]:
         async with self._connection() as db:
             queries = {
-                "available_codes": "SELECT COUNT(*) AS value FROM gift_codes",
+                "available_codes": """
+                    SELECT COUNT(*) AS value
+                    FROM gift_codes AS gc
+                    LEFT JOIN gift_reservations AS gr ON gr.code_id = gc.id
+                    WHERE gr.id IS NULL
+                """,
+                "gift_manual_reviews": """
+                    SELECT COUNT(*) AS value
+                    FROM gift_reservations
+                    WHERE status = 'manual_review'
+                """,
                 "claimed_users": "SELECT COUNT(*) AS value FROM claims",
                 "eligible_members": """
                     SELECT COUNT(*) AS value
@@ -407,9 +482,72 @@ class GiftStorage:
         user_id: str,
         send_code: Callable[[str], Awaitable[None]],
     ) -> ClaimOutcome:
-        """Send and consume one code in a single serialized inventory operation."""
+        """Reserve, send, and consume one code without holding a network transaction."""
         group_id = str(group_id).strip()
         user_id = str(user_id).strip()
+        reservation = await self._reserve_claim(group_id, user_id)
+        if isinstance(reservation, ClaimOutcome):
+            return reservation
+        reservation_id = int(reservation["reservation_id"])
+        code = str(reservation["code"])
+        try:
+            await send_code(code)
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self._mark_reservation_review(
+                    reservation_id,
+                    "CancelledError",
+                )
+            )
+            raise
+        except TimeoutError as exc:
+            await self._mark_reservation_review(
+                reservation_id,
+                type(exc).__name__,
+            )
+            return ClaimOutcome("send_ambiguous", type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - delivery adapter boundary
+            if is_clear_delivery_failure(exc):
+                released = await self._release_reservation(
+                    reservation_id,
+                    expected_status="reserved",
+                )
+                if released:
+                    return ClaimOutcome("send_failed", type(exc).__name__)
+                return ClaimOutcome("send_ambiguous", "ReservationStateChanged")
+            await self._mark_reservation_review(
+                reservation_id,
+                type(exc).__name__,
+            )
+            return ClaimOutcome("send_ambiguous", type(exc).__name__)
+        try:
+            completed = await self._complete_reservation(
+                reservation_id,
+                expected_status="reserved",
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self._mark_reservation_review(
+                    reservation_id,
+                    "CancelledError",
+                )
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - durable finalize boundary
+            await self._mark_reservation_review(
+                reservation_id,
+                type(exc).__name__,
+            )
+            return ClaimOutcome("send_ambiguous", type(exc).__name__)
+        if not completed:
+            return ClaimOutcome("send_ambiguous", "ReservationStateChanged")
+        return ClaimOutcome("success")
+
+    async def _reserve_claim(
+        self,
+        group_id: str,
+        user_id: str,
+    ) -> dict[str, str | int] | ClaimOutcome:
         async with self._write_lock, self._connection() as db:
             await db.execute("BEGIN IMMEDIATE")
             claim_cursor = await db.execute(
@@ -419,6 +557,17 @@ class GiftStorage:
             if await claim_cursor.fetchone() is not None:
                 await db.rollback()
                 return ClaimOutcome("already_claimed")
+            reservation_cursor = await db.execute(
+                """
+                SELECT status FROM gift_reservations
+                WHERE user_id = ?
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            if await reservation_cursor.fetchone() is not None:
+                await db.rollback()
+                return ClaimOutcome("send_ambiguous")
 
             eligible_cursor = await db.execute(
                 """
@@ -440,8 +589,11 @@ class GiftStorage:
 
             code_cursor = await db.execute(
                 """
-                SELECT id, code FROM gift_codes
-                ORDER BY id ASC
+                SELECT gc.id, gc.code
+                FROM gift_codes AS gc
+                LEFT JOIN gift_reservations AS gr ON gr.code_id = gc.id
+                WHERE gr.id IS NULL
+                ORDER BY gc.id ASC
                 LIMIT 1
                 """
             )
@@ -452,12 +604,49 @@ class GiftStorage:
 
             code_id = int(code_row["id"])
             code = str(code_row["code"])
-            try:
-                await send_code(code)
-            except Exception as exc:  # noqa: BLE001 - delivery adapter boundary
-                await db.rollback()
-                return ClaimOutcome("send_failed", type(exc).__name__)
+            now = utc_now()
+            cursor = await db.execute(
+                """
+                INSERT INTO gift_reservations(
+                    code_id, user_id, group_id, status,
+                    reserved_at, updated_at
+                )
+                VALUES (?, ?, ?, 'reserved', ?, ?)
+                """,
+                (code_id, user_id, group_id, now, now),
+            )
+            reservation_id = int(cursor.lastrowid)
+            await db.commit()
+            return {
+                "reservation_id": reservation_id,
+                "code": code,
+            }
 
+    async def _complete_reservation(
+        self,
+        reservation_id: int,
+        *,
+        expected_status: str,
+    ) -> bool:
+        if expected_status not in {"reserved", "manual_review"}:
+            raise ValueError("invalid_reservation_status")
+        async with self._write_lock, self._connection() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """
+                SELECT gr.id, gr.code_id, gr.user_id, gr.group_id,
+                       gr.status, gc.code
+                FROM gift_reservations AS gr
+                JOIN gift_codes AS gc ON gc.id = gr.code_id
+                WHERE gr.id = ? AND gr.status = ?
+                """,
+                (int(reservation_id), expected_status),
+            )
+            reservation = await cursor.fetchone()
+            if not reservation:
+                await db.rollback()
+                return False
+            code = str(reservation["code"])
             await db.execute(
                 """
                 INSERT INTO claims(
@@ -466,8 +655,8 @@ class GiftStorage:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    user_id,
-                    group_id,
+                    str(reservation["user_id"]),
+                    str(reservation["group_id"]),
                     code_suffix(code),
                     code_digest(code),
                     utc_now(),
@@ -479,8 +668,123 @@ class GiftStorage:
                 SET eligible_group_id = NULL
                 WHERE user_id = ?
                 """,
-                (user_id,),
+                (str(reservation["user_id"]),),
             )
-            await db.execute("DELETE FROM gift_codes WHERE id = ?", (code_id,))
+            await db.execute(
+                "DELETE FROM eligible_members WHERE user_id = ?",
+                (str(reservation["user_id"]),),
+            )
+            await db.execute(
+                "DELETE FROM gift_codes WHERE id = ?",
+                (int(reservation["code_id"]),),
+            )
             await db.commit()
-            return ClaimOutcome("success")
+            return True
+
+    async def _release_reservation(
+        self,
+        reservation_id: int,
+        *,
+        expected_status: str,
+    ) -> bool:
+        if expected_status not in {"reserved", "manual_review"}:
+            raise ValueError("invalid_reservation_status")
+        async with self._write_lock, self._connection() as db:
+            cursor = await db.execute(
+                """
+                DELETE FROM gift_reservations
+                WHERE id = ? AND status = ?
+                """,
+                (int(reservation_id), expected_status),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def _mark_reservation_review(
+        self,
+        reservation_id: int,
+        error_type: str,
+    ) -> bool:
+        async with self._write_lock, self._connection() as db:
+            cursor = await db.execute(
+                """
+                UPDATE gift_reservations
+                SET status = 'manual_review', updated_at = ?, error_type = ?
+                WHERE id = ? AND status = 'reserved'
+                """,
+                (utc_now(), str(error_type)[:100], int(reservation_id)),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def list_gift_reviews(self, page: int, page_size: int) -> dict:
+        page = max(1, int(page))
+        page_size = min(100, max(1, int(page_size)))
+        offset = (page - 1) * page_size
+        async with self._connection() as db:
+            cursor = await db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM gift_reservations
+                WHERE status = 'manual_review'
+                """
+            )
+            total_row = await cursor.fetchone()
+            total = int(total_row["total"] or 0)
+            cursor = await db.execute(
+                """
+                SELECT gr.id, gr.user_id, gr.group_id, gr.reserved_at,
+                       gr.updated_at, gr.error_type,
+                       substr(gc.code, -4) AS code_suffix
+                FROM gift_reservations AS gr
+                JOIN gift_codes AS gc ON gc.id = gr.code_id
+                WHERE gr.status = 'manual_review'
+                ORDER BY gr.updated_at DESC, gr.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (page_size, offset),
+            )
+            items = [
+                {**dict(row), "id": str(row["id"])} for row in await cursor.fetchall()
+            ]
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "has_more": offset + len(items) < total,
+        }
+
+    async def recover_reserved(self, *, stale_before: str) -> int:
+        async with self._write_lock, self._connection() as db:
+            cursor = await db.execute(
+                """
+                UPDATE gift_reservations
+                SET status = 'manual_review',
+                    updated_at = ?,
+                    error_type = CASE
+                        WHEN error_type = '' THEN 'ProcessRestarted'
+                        ELSE error_type
+                    END
+                WHERE status = 'reserved' AND updated_at <= ?
+                """,
+                (utc_now(), str(stale_before)),
+            )
+            await db.commit()
+            return cursor.rowcount
+
+    async def review_gift_delivery(
+        self,
+        reservation_id: int,
+        *,
+        delivered: bool,
+    ) -> bool:
+        if delivered:
+            return await self._complete_reservation(
+                reservation_id,
+                expected_status="manual_review",
+            )
+        return await self._release_reservation(
+            reservation_id,
+            expected_status="manual_review",
+        )

@@ -9,6 +9,7 @@ from conftest import load_plugin_module
 
 ROOT = Path(__file__).resolve().parents[1]
 campaign_messages = load_plugin_module("campaign_messages")
+load_plugin_module("main")
 
 
 def test_metadata_and_config_contract():
@@ -18,8 +19,8 @@ def test_metadata_and_config_contract():
     assert metadata["name"] == "astrbot_plugin_transfer_station"
     assert metadata["version"] == "v1.3.0"
     assert metadata["support_platforms"] == ["aiocqhttp"]
-    assert metadata["astrbot_version"] == ">=4.16,<5"
-    assert metadata["pages"][0]["name"] == "gift_codes"
+    assert metadata["astrbot_version"] == ">=4.26,<5"
+    assert [page["name"] for page in metadata["pages"]] == ["gift_codes"]
     assert {
         "enabled",
         "enabled_group_ids",
@@ -51,6 +52,18 @@ def test_metadata_and_config_contract():
     assert {
         f"{key}_content" for key in campaign_messages.CAMPAIGN_TEXT_DEFAULTS
     }.issubset(schema)
+    for key, default in campaign_messages.CAMPAIGN_TEXT_DEFAULTS.items():
+        assert schema[f"{key}_content"]["default"] == default
+    assert not any(
+        "?" in value
+        for item in schema.values()
+        for value in (
+            item.get("description"),
+            item.get("hint"),
+            item.get("default"),
+        )
+        if isinstance(value, str)
+    )
 
 
 def test_page_uses_bridge_and_safe_dynamic_text_rendering():
@@ -77,18 +90,20 @@ def test_page_uses_bridge_and_safe_dynamic_text_rendering():
 
 
 def test_campaign_command_groups_require_admin_permission():
-    handlers = {
-        handler.handler_name: handler
+    handlers = [
+        handler
         for handler in star_handlers_registry
-        if handler.handler_name
+        if handler.handler_module_path == f"{ROOT.name}.main"
+        and handler.handler_name
         in {"newapi_commands", "lottery_commands", "compensation_commands"}
-    }
-    assert set(handlers) == {
+    ]
+    assert len(handlers) == 3
+    assert {handler.handler_name for handler in handlers} == {
         "newapi_commands",
         "lottery_commands",
         "compensation_commands",
     }
-    for handler in handlers.values():
+    for handler in handlers:
         filter_names = {type(item).__name__ for item in handler.event_filters}
         assert "PermissionTypeFilter" in filter_names
         assert "CommandGroupFilter" in filter_names

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Mapping
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
+from datetime import timedelta
 from typing import Any
 
 import astrbot.api.message_components as Comp
@@ -15,6 +17,7 @@ from astrbot.core.star.filter.platform_adapter_type import PlatformAdapterType
 from .campaign_messages import CAMPAIGN_TEXT_DEFAULTS
 from .campaign_utils import (
     ActionResult,
+    is_reserved_lottery_keyword,
     parse_duration,
     parse_positive_decimal,
     parse_time_spec,
@@ -33,6 +36,25 @@ REPOSITORY = "https://github.com/diaomin66/astrbot_plugin_transfer_station"
 BASELINE_ACTION_TIMEOUT_SECONDS = 20
 BASELINE_RETRY_SECONDS = 60
 CAMPAIGN_SCHEDULER_SECONDS = 5
+USER_LOOKUP_COOLDOWN_SECONDS = 3
+USER_LOOKUP_CONCURRENCY = 4
+USER_LOOKUP_QUEUE_TIMEOUT_SECONDS = 0.1
+GIFT_SEND_TIMEOUT_SECONDS = 20
+MAX_NEWAPI_TIMEOUT_SECONDS = 120
+LOTTERY_NOTIFICATION_KEYS = {
+    "lottery_published",
+    "lottery_opened",
+    "lottery_drawn",
+    "lottery_no_winner",
+    "lottery_claim_closed",
+    "lottery_cancelled",
+}
+COMPENSATION_NOTIFICATION_KEYS = {
+    "comp_opened",
+    "comp_closed",
+    "comp_auto_closed",
+    "comp_budget_closed",
+}
 
 
 class TransferStationPlugin(Star):
@@ -49,13 +71,24 @@ class TransferStationPlugin(Star):
         self.compensation_storage = CompensationStorage(
             StarTools.get_data_dir(PLUGIN_NAME) / "compensation.db"
         )
-        self.page_api = GiftPageApi(context, self.storage)
-        self.page_api.register_routes()
         self._baseline_lock = asyncio.Lock()
         self._baseline_task: asyncio.Task[None] | None = None
         self._campaign_task: asyncio.Task[None] | None = None
+        self._processing_recovery_task: asyncio.Task[None] | None = None
+        self._gift_recovery_task: asyncio.Task[None] | None = None
+        self._campaign_lifecycle_lock = asyncio.Lock()
+        self._campaign_announcement_lock = asyncio.Lock()
         self._newapi_client: NewApiClient | None = None
+        self._newapi_close_tasks: set[asyncio.Task[None]] = set()
         self._ready_group_ids: set[str] = set()
+        self._pending_group_increases: dict[str, set[str]] = {}
+        self._user_lookup_lock = asyncio.Lock()
+        self._user_lookup_last: dict[tuple[str, str, str], float] = {}
+        self._user_lookup_semaphore = asyncio.Semaphore(USER_LOOKUP_CONCURRENCY)
+        self._plugin_initialized = False
+        self._terminating = False
+        self.page_api = GiftPageApi(context, self.storage)
+        self.page_api.register_routes()
 
     def _enabled(self) -> bool:
         return bool(self.config.get("enabled", True))
@@ -97,15 +130,53 @@ class TransferStationPlugin(Star):
         return content
 
     def _newapi(self) -> NewApiClient:
+        fingerprint = NewApiClient.config_fingerprint(self.config)
+        if (
+            self._newapi_client is not None
+            and hasattr(self._newapi_client, "configuration_fingerprint")
+            and self._newapi_client.configuration_fingerprint != fingerprint
+        ):
+            old_client = self._newapi_client
+            self._newapi_client = None
+            task = asyncio.create_task(
+                self._close_newapi_client(old_client),
+                name=f"{PLUGIN_NAME}:close-retired-newapi",
+            )
+            self._newapi_close_tasks.add(task)
+            task.add_done_callback(self._newapi_close_tasks.discard)
         if self._newapi_client is None:
             self._newapi_client = NewApiClient(self.config)
         return self._newapi_client
+
+    @staticmethod
+    async def _close_newapi_client(client: NewApiClient) -> None:
+        close = getattr(client, "close", None)
+        if not callable(close):
+            return
+        try:
+            await close()
+        except Exception as exc:  # noqa: BLE001 - HTTP client lifecycle boundary
+            logger.warning(
+                "Closing retired New API client failed error_type=%s",
+                type(exc).__name__,
+            )
+
+    def _newapi_timeout_seconds(self) -> float:
+        try:
+            value = float(self.config.get("newapi_timeout_seconds", 10))
+        except (TypeError, ValueError):
+            value = 10
+        return min(120.0, max(1.0, value))
 
     def _lottery_service(self, *, require_newapi: bool = False) -> LotteryService:
         client: NewApiClient | None = None
         if require_newapi:
             client = self._newapi()
-        return LotteryService(self.lottery_storage, client)
+        return LotteryService(
+            self.lottery_storage,
+            client,
+            reserved_keyword=self._reserved_lottery_keyword,
+        )
 
     def _compensation_service(
         self,
@@ -178,6 +249,13 @@ class TransferStationPlugin(Star):
                     "本次兑换码已退回库存。"
                 ),
             ),
+            "send_ambiguous": (
+                "gift_manual_review_content",
+                (
+                    "新人礼发送结果暂时无法确认，兑换码已冻结且不会重复发放。"
+                    "请联系管理员在新人礼管理页面核查。"
+                ),
+            ),
             "baseline_pending": (
                 "baseline_pending_content",
                 "本群成员基线尚未同步完成，暂时无法领取新人礼，请稍后重试。",
@@ -240,11 +318,7 @@ class TransferStationPlugin(Star):
         return "".join(text_parts).strip() if mentioned_self else None
 
     def _reserved_lottery_keyword(self, keyword: str) -> bool:
-        return (
-            keyword == self._claim_phrase()
-            or keyword in {"确认 抽奖", "取消 抽奖", "确认 补偿", "取消 补偿"}
-            or re.fullmatch(r"(?:抽奖|补偿)\s+\d+", keyword) is not None
-        )
+        return is_reserved_lottery_keyword(keyword, self._claim_phrase())
 
     async def _send_action(
         self,
@@ -253,7 +327,73 @@ class TransferStationPlugin(Star):
     ) -> None:
         if result.stop:
             event.stop_event()
+        if result.should_announce and self._notification_storage(result.key):
+            await self._send_persisted_notification(
+                result,
+                lambda persisted: self._send_group_text(
+                    event,
+                    self._campaign_content(persisted),
+                ),
+            )
+            return
         await self._send_group_text(event, self._campaign_content(result))
+
+    def _notification_storage(
+        self,
+        event_key: str,
+    ) -> LotteryStorage | CompensationStorage | None:
+        if event_key in LOTTERY_NOTIFICATION_KEYS:
+            return self.lottery_storage
+        if event_key in COMPENSATION_NOTIFICATION_KEYS:
+            return self.compensation_storage
+        return None
+
+    async def _send_persisted_notification(
+        self,
+        result: ActionResult,
+        sender: Callable[[ActionResult], Awaitable[None]],
+    ) -> bool:
+        storage = self._notification_storage(result.key)
+        activity_id = result.placeholders.get("activity_id")
+        if storage is None or not str(activity_id or "").isdigit():
+            await sender(result)
+            return True
+        async with self._campaign_announcement_lock:
+            notification = await storage.claim_notification(
+                int(str(activity_id)),
+                result.key,
+            )
+            if not notification:
+                return False
+            persisted = ActionResult(
+                str(notification["event_key"]),
+                {
+                    str(key): str(value)
+                    for key, value in notification["placeholders"].items()
+                },
+            )
+            try:
+                await sender(persisted)
+            except BaseException:
+                await asyncio.shield(
+                    storage.release_notification(
+                        int(notification["id"]),
+                        str(notification["lease_marker"]),
+                    )
+                )
+                raise
+            marked = await storage.mark_notification_sent(
+                int(notification["id"]),
+                str(notification["lease_marker"]),
+            )
+            if not marked:
+                logger.warning(
+                    "Campaign notification sent but lease finalization failed "
+                    "event=%s activity=%s",
+                    result.key,
+                    activity_id,
+                )
+            return True
 
     async def _campaign_guard(
         self,
@@ -277,6 +417,38 @@ class TransferStationPlugin(Star):
 
     async def _send_group_text(self, event: AstrMessageEvent, text: str) -> None:
         await event.send(event.plain_result(text))
+
+    async def _allow_user_lookup(
+        self,
+        feature: str,
+        group_id: str,
+        user_id: str,
+    ) -> bool:
+        key = (feature, str(group_id), str(user_id))
+        now = time.monotonic()
+        async with self._user_lookup_lock:
+            previous = self._user_lookup_last.get(key)
+            if previous is not None and now - previous < USER_LOOKUP_COOLDOWN_SECONDS:
+                return False
+            self._user_lookup_last[key] = now
+            if len(self._user_lookup_last) > 5000:
+                cutoff = now - 3600
+                self._user_lookup_last = {
+                    item_key: timestamp
+                    for item_key, timestamp in self._user_lookup_last.items()
+                    if timestamp >= cutoff
+                }
+            return True
+
+    async def _acquire_user_lookup_slot(self) -> bool:
+        try:
+            await asyncio.wait_for(
+                self._user_lookup_semaphore.acquire(),
+                timeout=USER_LOOKUP_QUEUE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            return False
+        return True
 
     @staticmethod
     def _extract_action_list(result: Any) -> list[Mapping[str, Any]]:
@@ -324,7 +496,13 @@ class TransferStationPlugin(Star):
         )
         return self._extract_action_list(result)
 
-    async def _sync_group_baseline(self, client: Any, group_id: str) -> bool:
+    async def _sync_group_baseline(
+        self,
+        client: Any,
+        group_id: str,
+        *,
+        exclude_user_id: str = "",
+    ) -> bool:
         group_id = str(group_id).strip()
         if not group_id or not self._group_enabled(group_id):
             return False
@@ -348,16 +526,20 @@ class TransferStationPlugin(Star):
                 )
                 return False
 
-            user_ids = {
+            listed_user_ids = {
                 str(member.get("user_id", "")).strip()
                 for member in members
                 if str(member.get("user_id", "")).strip()
             }
-            if not user_ids:
+            if not listed_user_ids:
                 logger.warning(
                     "Group baseline sync returned no users group=%s", group_id
                 )
                 return False
+            user_ids = set(listed_user_ids)
+            user_ids.difference_update(self._pending_group_increases.get(group_id, ()))
+            if exclude_user_id:
+                user_ids.discard(str(exclude_user_id))
 
             result = await self.storage.record_group_baseline(
                 group_id,
@@ -437,9 +619,31 @@ class TransferStationPlugin(Star):
         ):
             return
 
-        if not await self._sync_group_baseline(event.bot, group_id):
-            return
-        registration = await self.storage.register_newcomer(group_id, user_id)
+        pending = self._pending_group_increases.setdefault(group_id, set())
+        pending.add(user_id)
+        try:
+            baseline_was_ready = group_id in self._ready_group_ids or (
+                await self.storage.is_group_baselined(group_id)
+            )
+            if not await self._sync_group_baseline(
+                event.bot,
+                group_id,
+                exclude_user_id=user_id,
+            ):
+                return
+            if not baseline_was_ready:
+                await self.storage.record_group_baseline(group_id, [user_id])
+                logger.info(
+                    "Newcomer event stored in initial baseline group=%s user=%s",
+                    group_id,
+                    user_id,
+                )
+                return
+            registration = await self.storage.register_newcomer(group_id, user_id)
+        finally:
+            pending.discard(user_id)
+            if not pending:
+                self._pending_group_increases.pop(group_id, None)
 
         if registration != "eligible":
             return
@@ -469,11 +673,14 @@ class TransferStationPlugin(Star):
             return
 
         async def send_code(code: str) -> None:
-            await event.bot.call_action(
-                "send_private_msg",
-                user_id=int(user_id),
-                group_id=int(group_id),
-                message=self._gift_message_content(code),
+            await asyncio.wait_for(
+                event.bot.call_action(
+                    "send_private_msg",
+                    user_id=int(user_id),
+                    group_id=int(group_id),
+                    message=self._gift_message_content(code),
+                ),
+                timeout=GIFT_SEND_TIMEOUT_SECONDS,
             )
 
         outcome = await self.storage.claim_code(
@@ -490,9 +697,11 @@ class TransferStationPlugin(Star):
         user_id: str,
         group_id: str,
     ) -> None:
-        if outcome.status == "send_failed":
+        if outcome.status in {"send_failed", "send_ambiguous"}:
             logger.warning(
-                "Temporary chat delivery failed user=%s group=%s error_type=%s",
+                "Temporary chat delivery unresolved status=%s user=%s group=%s "
+                "error_type=%s",
+                outcome.status,
                 user_id,
                 group_id,
                 outcome.error_type,
@@ -521,8 +730,8 @@ class TransferStationPlugin(Star):
                     "display_type": result.display_type,
                 },
             )
-        except NewApiError as exc:
-            action = ActionResult("newapi_error", {"error": str(exc)})
+        except NewApiError:
+            action = ActionResult("newapi_error")
         await event.send(event.plain_result(self._campaign_content(action)))
 
     @filter.command_group("抽奖")
@@ -671,12 +880,23 @@ class TransferStationPlugin(Star):
         group_id = await self._campaign_guard(event, "lottery")
         if not group_id:
             return
-        try:
-            service = self._lottery_service(require_newapi=True)
-        except NewApiError as exc:
+        activity = await self.lottery_storage.get_active(group_id)
+        if (
+            activity
+            and activity["status"] == "draft"
+            and self._reserved_lottery_keyword(str(activity["keyword"]))
+        ):
             await self._send_action(
                 event,
-                ActionResult("newapi_error", {"error": str(exc)}),
+                ActionResult("lottery_keyword_reserved"),
+            )
+            return
+        try:
+            service = self._lottery_service(require_newapi=True)
+        except NewApiError:
+            await self._send_action(
+                event,
+                ActionResult("newapi_error"),
             )
             return
         await self._send_action(event, await service.publish(group_id))
@@ -739,6 +959,12 @@ class TransferStationPlugin(Star):
             for member in members
             if str(member.get("user_id", "")).strip()
         ]
+        if not member_ids:
+            await self._send_action(
+                event,
+                ActionResult("lottery_member_list_failed"),
+            )
+            return
         result = await self._lottery_service().draw(activity, member_ids)
         await self._send_action(event, result)
 
@@ -801,10 +1027,10 @@ class TransferStationPlugin(Star):
         except ValueError:
             await self._send_action(event, ActionResult("comp_invalid_argument"))
             return
-        except NewApiError as exc:
+        except NewApiError:
             await self._send_action(
                 event,
-                ActionResult("newapi_error", {"error": str(exc)}),
+                ActionResult("newapi_error"),
             )
             return
         result = await service.open(
@@ -884,23 +1110,39 @@ class TransferStationPlugin(Star):
             service = self._lottery_service()
             target_match = re.fullmatch(r"抽奖\s+(\d+)", text)
             if target_match:
-                try:
-                    service = self._lottery_service(require_newapi=True)
-                    result = await service.submit_target(
-                        group_id,
-                        user_id,
-                        target_match.group(1),
+                if not await self._allow_user_lookup(
+                    "lottery",
+                    group_id,
+                    user_id,
+                ):
+                    await self._send_action(
+                        event,
+                        ActionResult("campaign_rate_limited"),
                     )
-                except NewApiError as exc:
-                    result = ActionResult("newapi_error", {"error": str(exc)})
+                    return True
+                try:
+                    if not await self._acquire_user_lookup_slot():
+                        result = ActionResult("campaign_rate_limited")
+                    else:
+                        try:
+                            service = self._lottery_service(require_newapi=True)
+                            result = await service.submit_target(
+                                group_id,
+                                user_id,
+                                target_match.group(1),
+                            )
+                        finally:
+                            self._user_lookup_semaphore.release()
+                except NewApiError:
+                    result = ActionResult("newapi_error")
                 await self._send_action(event, result)
                 return True
             if text == "确认 抽奖":
                 try:
                     service = self._lottery_service(require_newapi=True)
                     result = await service.confirm(group_id, user_id)
-                except NewApiError as exc:
-                    result = ActionResult("newapi_error", {"error": str(exc)})
+                except NewApiError:
+                    result = ActionResult("newapi_error")
                 await self._send_action(event, result)
                 return True
             if text == "取消 抽奖":
@@ -918,23 +1160,39 @@ class TransferStationPlugin(Star):
             service = self._compensation_service()
             target_match = re.fullmatch(r"补偿\s+(\d+)", text)
             if target_match:
-                try:
-                    service = self._compensation_service(require_newapi=True)
-                    result = await service.submit(
-                        group_id,
-                        user_id,
-                        target_match.group(1),
+                if not await self._allow_user_lookup(
+                    "compensation",
+                    group_id,
+                    user_id,
+                ):
+                    await self._send_action(
+                        event,
+                        ActionResult("campaign_rate_limited"),
                     )
-                except NewApiError as exc:
-                    result = ActionResult("newapi_error", {"error": str(exc)})
+                    return True
+                try:
+                    if not await self._acquire_user_lookup_slot():
+                        result = ActionResult("campaign_rate_limited")
+                    else:
+                        try:
+                            service = self._compensation_service(require_newapi=True)
+                            result = await service.submit(
+                                group_id,
+                                user_id,
+                                target_match.group(1),
+                            )
+                        finally:
+                            self._user_lookup_semaphore.release()
+                except NewApiError:
+                    result = ActionResult("newapi_error")
                 await self._send_action(event, result)
                 return True
             if text == "确认 补偿":
                 try:
                     service = self._compensation_service(require_newapi=True)
                     result = await service.confirm(group_id, user_id)
-                except NewApiError as exc:
-                    result = ActionResult("newapi_error", {"error": str(exc)})
+                except NewApiError:
+                    result = ActionResult("newapi_error")
                 await self._send_action(event, result)
                 return True
             if text == "取消 补偿":
@@ -950,18 +1208,132 @@ class TransferStationPlugin(Star):
         client: Any,
         group_id: str,
         result: ActionResult,
-    ) -> None:
-        try:
+    ) -> bool:
+        async def sender(persisted: ActionResult) -> None:
             await client.call_action(
                 "send_group_msg",
                 group_id=int(group_id),
-                message=self._campaign_content(result),
+                message=self._campaign_content(persisted),
             )
+
+        try:
+            if result.should_announce and self._notification_storage(result.key):
+                return await self._send_persisted_notification(result, sender)
+            await sender(result)
+            return True
         except Exception as exc:  # noqa: BLE001 - OneBot boundary
             logger.warning(
                 "Campaign group notification failed group=%s error_type=%s",
                 group_id,
                 type(exc).__name__,
+            )
+            return False
+
+    async def _announce_campaign(
+        self,
+        group_id: str,
+        result: ActionResult,
+    ) -> bool:
+        for client in self._iter_onebot_clients():
+            if await self._send_group_action(client, group_id, result):
+                return True
+        return False
+
+    async def _flush_campaign_notifications(self) -> None:
+        pending = [
+            *await self.lottery_storage.list_pending_notifications(),
+            *await self.compensation_storage.list_pending_notifications(),
+        ]
+        for notification in pending:
+            event_key = str(notification["event_key"])
+            feature = (
+                "lottery"
+                if event_key in LOTTERY_NOTIFICATION_KEYS
+                else "compensation"
+                if event_key in COMPENSATION_NOTIFICATION_KEYS
+                else ""
+            )
+            group_id = str(notification["group_id"])
+            if not feature or not self._feature_group_enabled(feature, group_id):
+                continue
+            result = ActionResult(
+                event_key,
+                {
+                    str(key): str(value)
+                    for key, value in notification["placeholders"].items()
+                },
+            )
+            for client in self._iter_onebot_clients():
+                if await self._send_group_action(client, group_id, result):
+                    break
+
+    async def _reconcile_campaign_scheduler(self) -> None:
+        async with self._campaign_lifecycle_lock:
+            await self._reconcile_campaign_scheduler_locked()
+
+    async def _reconcile_campaign_scheduler_locked(self) -> None:
+        if self._terminating or not self._plugin_initialized:
+            return
+        should_run = self._feature_enabled("lottery") or self._feature_enabled(
+            "compensation"
+        )
+        current_task = self._campaign_task
+        if should_run:
+            if current_task is None or current_task.done():
+                self._campaign_task = asyncio.create_task(
+                    self._campaign_scheduler_loop(),
+                    name=f"{PLUGIN_NAME}:campaign-scheduler",
+                )
+            return
+        if current_task is not None and not current_task.done():
+            current_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await current_task
+        if self._campaign_task is current_task:
+            self._campaign_task = None
+
+    async def _recover_stale_processing(self) -> tuple[int, int]:
+        now = utc_now()
+        stale_before = now - timedelta(
+            seconds=self._newapi_timeout_seconds() + CAMPAIGN_SCHEDULER_SECONDS * 2
+        )
+        recovered = await asyncio.gather(
+            self.lottery_storage.recover_processing(
+                now=now,
+                stale_before=stale_before,
+            ),
+            self.compensation_storage.recover_processing(
+                now=now,
+                stale_before=stale_before,
+            ),
+        )
+        return int(recovered[0]), int(recovered[1])
+
+    async def _delayed_processing_recovery(self) -> None:
+        await asyncio.sleep(MAX_NEWAPI_TIMEOUT_SECONDS + CAMPAIGN_SCHEDULER_SECONDS * 2)
+        (
+            recovered_lottery,
+            recovered_compensation,
+        ) = await self._recover_stale_processing()
+        if recovered_lottery or recovered_compensation:
+            logger.warning(
+                "Recovered stale payouts lottery=%s compensation=%s",
+                recovered_lottery,
+                recovered_compensation,
+            )
+
+    async def _delayed_gift_recovery(self) -> None:
+        await asyncio.sleep(GIFT_SEND_TIMEOUT_SECONDS + CAMPAIGN_SCHEDULER_SECONDS * 2)
+        stale_before = utc_now() - timedelta(
+            seconds=GIFT_SEND_TIMEOUT_SECONDS + CAMPAIGN_SCHEDULER_SECONDS
+        )
+        recovered = await self.storage.recover_reserved(
+            stale_before=to_iso(stale_before),
+        )
+        if recovered:
+            logger.warning(
+                "Recovered stale gift reservations count=%s",
+                recovered,
             )
 
     async def _draw_due_lottery(
@@ -990,24 +1362,31 @@ class TransferStationPlugin(Star):
                 for member in members
                 if str(member.get("user_id", "")).strip()
             ]
+            if not member_ids:
+                continue
             result = await self._lottery_service().draw(activity, member_ids)
-            await self._send_group_action(client, group_id, result)
+            if result.should_announce:
+                await self._send_group_action(client, group_id, result)
             return
 
     async def _campaign_scheduler_once(self) -> None:
         now = utc_now()
-        clients = self._iter_onebot_clients()
         if self._feature_enabled("lottery"):
             opened = await self.lottery_storage.mark_due_open(now=now)
             for activity in opened:
                 group_id = str(activity["group_id"])
-                if clients and self._feature_group_enabled("lottery", group_id):
-                    await self._send_group_action(
-                        clients[0],
+                current = await self.lottery_storage.get_activity(int(activity["id"]))
+                if (
+                    current
+                    and current["status"] == "open"
+                    and self._feature_group_enabled("lottery", group_id)
+                ):
+                    await self._announce_campaign(
                         group_id,
                         ActionResult(
                             "lottery_opened",
                             {
+                                "activity_id": str(activity["id"]),
                                 "title": activity["title"],
                                 "keyword": activity["keyword"],
                             },
@@ -1018,34 +1397,45 @@ class TransferStationPlugin(Star):
             closed = await self.lottery_storage.expire(now=now)
             for activity in closed:
                 group_id = str(activity["group_id"])
-                if clients and self._feature_group_enabled("lottery", group_id):
-                    await self._send_group_action(
-                        clients[0],
+                if self._feature_group_enabled("lottery", group_id):
+                    await self._announce_campaign(
                         group_id,
                         ActionResult(
                             "lottery_claim_closed",
-                            {"title": activity["title"]},
+                            {
+                                "activity_id": str(activity["id"]),
+                                "title": activity["title"],
+                            },
                         ),
                     )
         if self._feature_enabled("compensation"):
             closed = await self.compensation_storage.tick(now=now)
             for activity in closed:
                 group_id = str(activity["group_id"])
-                if clients and self._feature_group_enabled("compensation", group_id):
-                    await self._send_group_action(
-                        clients[0],
+                if self._feature_group_enabled("compensation", group_id):
+                    await self._announce_campaign(
                         group_id,
                         ActionResult(
                             "comp_auto_closed",
-                            {"title": activity["title"]},
+                            {
+                                "activity_id": str(activity["id"]),
+                                "title": activity["title"],
+                            },
                         ),
                     )
+        await self._flush_campaign_notifications()
 
     async def _campaign_scheduler_loop(self) -> None:
         while True:
+            cycle = asyncio.create_task(
+                self._campaign_scheduler_once(),
+                name=f"{PLUGIN_NAME}:campaign-cycle",
+            )
             try:
-                await self._campaign_scheduler_once()
+                await asyncio.shield(cycle)
             except asyncio.CancelledError:
+                with suppress(asyncio.CancelledError):
+                    await cycle
                 raise
             except Exception as exc:  # noqa: BLE001 - background task boundary
                 logger.exception(
@@ -1070,6 +1460,9 @@ class TransferStationPlugin(Star):
             return
 
         if event.get_group_id():
+            if self._enabled() and self._is_claim_message(event):
+                await self._handle_claim(event)
+                return
             if await self._handle_campaign_message(event):
                 return
             if self._enabled():
@@ -1077,48 +1470,73 @@ class TransferStationPlugin(Star):
 
     async def initialize(self) -> None:
         """Initialize storage and start background synchronization tasks."""
-        await asyncio.gather(
-            self.storage.initialize(),
-            self.lottery_storage.initialize(),
-            self.compensation_storage.initialize(),
-        )
-        recovered_lottery, recovered_compensation = await asyncio.gather(
-            self.lottery_storage.recover_processing(now=utc_now()),
-            self.compensation_storage.recover_processing(now=utc_now()),
-        )
-        if recovered_lottery or recovered_compensation:
-            logger.warning(
-                "Recovered ambiguous payouts lottery=%s compensation=%s",
-                recovered_lottery,
-                recovered_compensation,
+        async with self._campaign_lifecycle_lock:
+            await asyncio.gather(
+                self.storage.initialize(),
+                self.lottery_storage.initialize(),
+                self.compensation_storage.initialize(),
             )
-        if self._enabled() and (
-            self._baseline_task is None or self._baseline_task.done()
-        ):
-            self._baseline_task = asyncio.create_task(
-                self._baseline_sync_loop(),
-                name=f"{PLUGIN_NAME}:baseline-sync",
-            )
-        if (
-            self._feature_enabled("lottery") or self._feature_enabled("compensation")
-        ) and (self._campaign_task is None or self._campaign_task.done()):
-            self._campaign_task = asyncio.create_task(
-                self._campaign_scheduler_loop(),
-                name=f"{PLUGIN_NAME}:campaign-scheduler",
-            )
+            self._terminating = False
+            self._plugin_initialized = True
+            if self._enabled() and (
+                self._baseline_task is None or self._baseline_task.done()
+            ):
+                self._baseline_task = asyncio.create_task(
+                    self._baseline_sync_loop(),
+                    name=f"{PLUGIN_NAME}:baseline-sync",
+                )
+            await self._reconcile_campaign_scheduler_locked()
+            if (
+                self._processing_recovery_task is None
+                or self._processing_recovery_task.done()
+            ):
+                self._processing_recovery_task = asyncio.create_task(
+                    self._delayed_processing_recovery(),
+                    name=f"{PLUGIN_NAME}:processing-recovery",
+                )
+            if self._gift_recovery_task is None or self._gift_recovery_task.done():
+                self._gift_recovery_task = asyncio.create_task(
+                    self._delayed_gift_recovery(),
+                    name=f"{PLUGIN_NAME}:gift-recovery",
+                )
 
     async def terminate(self) -> None:
         """Release plugin resources."""
-        if self._baseline_task is not None and not self._baseline_task.done():
-            self._baseline_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._baseline_task
-        self._baseline_task = None
-        if self._campaign_task is not None and not self._campaign_task.done():
-            self._campaign_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._campaign_task
-        self._campaign_task = None
-        if self._newapi_client is not None:
-            await self._newapi_client.close()
-        self._newapi_client = None
+        async with self._campaign_lifecycle_lock:
+            self._terminating = True
+            self._plugin_initialized = False
+            campaign_task = self._campaign_task
+            if campaign_task is not None and not campaign_task.done():
+                campaign_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await campaign_task
+            if self._campaign_task is campaign_task:
+                self._campaign_task = None
+            if self._baseline_task is not None and not self._baseline_task.done():
+                self._baseline_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._baseline_task
+            self._baseline_task = None
+            if (
+                self._processing_recovery_task is not None
+                and not self._processing_recovery_task.done()
+            ):
+                self._processing_recovery_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._processing_recovery_task
+            self._processing_recovery_task = None
+            if (
+                self._gift_recovery_task is not None
+                and not self._gift_recovery_task.done()
+            ):
+                self._gift_recovery_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._gift_recovery_task
+            self._gift_recovery_task = None
+            if self._newapi_client is not None:
+                await self._close_newapi_client(self._newapi_client)
+            self._newapi_client = None
+            close_tasks = tuple(self._newapi_close_tasks)
+            if close_tasks:
+                await asyncio.gather(*close_tasks, return_exceptions=True)
+            self._newapi_close_tasks.clear()

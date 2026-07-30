@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import time
 from decimal import Decimal
 
 import httpx
@@ -74,6 +77,30 @@ def test_quota_conversion_for_all_display_types():
     )
 
 
+@pytest.mark.parametrize("invalid_value", ["NaN", "Infinity", "-Infinity"])
+def test_quota_snapshot_rejects_non_finite_rates(invalid_value):
+    with pytest.raises(NewApiError, match="额度换算配置无效"):
+        QuotaSnapshot.from_status(
+            {
+                "quota_display_type": "USD",
+                "quota_per_unit": invalid_value,
+                "usd_exchange_rate": 7.2,
+                "custom_currency_exchange_rate": 1,
+            }
+        )
+
+
+def test_quota_conversion_rejects_oversized_finite_result():
+    snapshot = QuotaSnapshot(
+        display_type="USD",
+        quota_per_unit=Decimal("1e20"),
+        usd_exchange_rate=Decimal(1),
+        custom_currency_exchange_rate=Decimal(1),
+    )
+    with pytest.raises(NewApiError, match="超出安全范围"):
+        snapshot.amount_to_quota("1")
+
+
 @pytest.mark.asyncio
 async def test_token_auth_user_lookup_and_atomic_add_quota():
     requests = []
@@ -91,9 +118,74 @@ async def test_token_auth_user_lookup_and_atomic_add_quota():
 
     assert user.username == "alice"
     assert requests[1].url.path == "/api/user/manage"
-    assert requests[1].read().decode() == (
-        '{"id":123,"action":"add_quota","mode":"add","value":500000}'
+    assert json.loads(requests[1].read()) == {
+        "id": 123,
+        "action": "add_quota",
+        "mode": "add",
+        "value": 500000,
+    }
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_password_credentials_are_snapshotted_at_client_creation():
+    original = config(
+        newapi_base_url="https://old.example",
+        newapi_access_token="",
+        newapi_username="old-user",
+        newapi_password="OLD-SECRET",
     )
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        if request.url.path == "/api/user/login":
+            return response({"access_token": "session-token"})
+        return response({"id": 9, "username": "bob", "status": 1})
+
+    client = NewApiClient(
+        original,
+        client=httpx.AsyncClient(
+            base_url="https://old.example",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+    original.update(
+        {
+            "newapi_base_url": "https://new.example",
+            "newapi_username": "new-user",
+            "newapi_password": "NEW-SECRET",
+        }
+    )
+
+    await client.get_user(9)
+
+    assert requests[0].url.host == "old.example"
+    assert json.loads(requests[0].read()) == {
+        "username": "old-user",
+        "password": "OLD-SECRET",
+    }
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_timeout_is_a_total_wall_clock_limit():
+    async def slow_handler(_request: httpx.Request):
+        await asyncio.sleep(2)
+        return response()
+
+    client = NewApiClient(
+        config(newapi_timeout_seconds=1),
+        client=httpx.AsyncClient(
+            base_url="https://newapi.example",
+            transport=httpx.MockTransport(slow_handler),
+        ),
+    )
+    started = time.monotonic()
+    with pytest.raises(NewApiError) as exc:
+        await client.add_quota(1, 1)
+    assert exc.value.ambiguous is True
+    assert time.monotonic() - started < 1.5
     await client.close()
 
 
@@ -198,7 +290,8 @@ async def test_test_connection_rejects_insufficient_permission():
     await client.close()
 
 
-def test_url_validation_and_insecure_http_gate():
+@pytest.mark.asyncio
+async def test_url_validation_and_insecure_http_gate():
     with pytest.raises(NewApiError, match="HTTPS"):
         NewApiClient(config(newapi_base_url="http://newapi.example"))
     client = NewApiClient(
@@ -209,6 +302,7 @@ def test_url_validation_and_insecure_http_gate():
         client=httpx.AsyncClient(base_url="http://127.0.0.1:3000"),
     )
     assert client.base_url == "http://127.0.0.1:3000"
+    await client.close()
 
 
 @pytest.mark.asyncio
@@ -217,6 +311,27 @@ async def test_write_timeout_and_server_failure_are_ambiguous():
         raise httpx.ReadTimeout("timeout")
 
     client = NewApiClient(config(), client=async_client(timeout))
+    with pytest.raises(NewApiError) as exc:
+        await client.add_quota(1, 1)
+    assert exc.value.ambiguous is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response_factory",
+    [
+        lambda: httpx.Response(200, text="OK"),
+        lambda: httpx.Response(204),
+        lambda: httpx.Response(200, json=[]),
+        lambda: httpx.Response(302, json={"success": True}),
+    ],
+)
+async def test_unverifiable_write_response_is_ambiguous(response_factory):
+    client = NewApiClient(
+        config(),
+        client=async_client(lambda _request: response_factory()),
+    )
     with pytest.raises(NewApiError) as exc:
         await client.add_quota(1, 1)
     assert exc.value.ambiguous is True

@@ -142,6 +142,10 @@ h2 {
   color: rgba(255, 255, 255, 0.75);
 }
 
+.stat-card.review strong {
+  color: var(--accent);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.55fr);
@@ -255,6 +259,20 @@ textarea:focus {
   padding: 12px 14px;
   font-size: 0.84rem;
   line-height: 1.55;
+}
+
+.review-warning {
+  margin-bottom: 16px;
+}
+
+td strong,
+td small {
+  display: block;
+}
+
+td small {
+  margin-top: 4px;
+  color: var(--muted);
 }
 
 .table-wrap {

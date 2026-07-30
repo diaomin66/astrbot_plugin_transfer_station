@@ -44,6 +44,10 @@
           <span>今日新人</span>
           <strong id="todayNewcomers">—</strong>
         </article>
+        <article class="stat-card review">
+          <span>待核查发放</span>
+          <strong id="giftManualReviews">—</strong>
+        </article>
       </section>
 
       <section class="workspace">
@@ -84,6 +88,44 @@
             网络超时可能造成 QQ 实际送达但本地回滚，请结合 NapCat 日志排查。
           </p>
         </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">DELIVERY REVIEW</p>
+            <h2>发送结果待核查</h2>
+          </div>
+          <span id="reviewRange" class="muted"></span>
+        </div>
+        <p class="warning review-warning">
+          仅在 NapCat 超时、任务中断或发送成功后的本地记账异常时出现。请先核对 QQ/NapCat
+          日志，再选择“确认送达”或“确认未送达”。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>QQ / 群号</th>
+                <th>兑换码尾号</th>
+                <th>异常类型</th>
+                <th>更新时间</th>
+                <th class="actions-column">核查</th>
+              </tr>
+            </thead>
+            <tbody id="reviewRows"></tbody>
+          </table>
+          <p id="reviewEmpty" class="empty" hidden>当前没有待核查发放。</p>
+        </div>
+        <div class="pagination">
+          <button id="reviewPrev" class="button secondary compact" type="button">
+            上一页
+          </button>
+          <span id="reviewPage">第 1 页</span>
+          <button id="reviewNext" class="button secondary compact" type="button">
+            下一页
+          </button>
+        </div>
       </section>
 
       <section class="panel">

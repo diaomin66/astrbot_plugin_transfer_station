@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -201,6 +202,30 @@ def test_custom_gift_message_without_placeholder_still_includes_code(
 
 
 @pytest.mark.asyncio
+async def test_lottery_publish_rechecks_current_newcomer_phrase(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {
+            "claim_phrase": "参与抽奖",
+            "lottery_enabled": True,
+        },
+    )
+    plugin._newapi_client = FakeNewApi()
+    now = campaign_utils.utc_now()
+    await plugin.lottery_storage.create_draft("100", "口令冲突", "1", now=now)
+    await plugin.lottery_storage.add_prize("100", "奖品", 1, "1")
+
+    result = await plugin._lottery_service(require_newapi=True).publish("100")
+
+    assert result.key == "lottery_keyword_reserved"
+    assert (await plugin.lottery_storage.get_active("100"))["status"] == "draft"
+
+
+@pytest.mark.asyncio
 async def test_group_increase_records_once_and_sends_welcome(plugin):
     raw = {
         "post_type": "notice",
@@ -256,6 +281,85 @@ async def test_join_before_baseline_completion_is_not_eligible(plugin):
     assert event.sent == []
     assert await plugin.storage.is_eligible("100", "200") is False
     assert await plugin.storage.register_newcomer("100", "200") == "known"
+
+
+@pytest.mark.asyncio
+async def test_first_join_after_restart_is_not_absorbed_into_existing_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    first = TransferStationPlugin(FakeContext(), {})
+    await first.storage.record_group_baseline("100", ["111"])
+
+    bot = FakeBot(
+        action_results={
+            "get_group_member_list": [
+                {"user_id": 111},
+                {"user_id": 222},
+            ],
+        }
+    )
+    reloaded = TransferStationPlugin(FakeContext(bot), {})
+    event = FakeEvent(
+        raw={
+            "post_type": "notice",
+            "notice_type": "group_increase",
+            "group_id": 100,
+            "user_id": 222,
+            "self_id": 999,
+        },
+        bot=bot,
+    )
+
+    await reloaded.handle_aiocqhttp_event(event)
+
+    assert await reloaded.storage.is_eligible("100", "222") is True
+    assert len(event.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_baseline_sync_cannot_absorb_concurrent_join(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    first = TransferStationPlugin(FakeContext(), {})
+    await first.storage.record_group_baseline("100", ["111"])
+    member_list_entered = asyncio.Event()
+    release_member_list = asyncio.Event()
+
+    class BlockingBot(FakeBot):
+        async def call_action(self, action, **params):
+            self.calls.append((action, params))
+            if action == "get_group_member_list":
+                member_list_entered.set()
+                await release_member_list.wait()
+                return [{"user_id": 111}, {"user_id": 222}]
+            return {"message_id": 1}
+
+    bot = BlockingBot()
+    reloaded = TransferStationPlugin(FakeContext(bot), {})
+    sync_task = asyncio.create_task(reloaded._sync_group_baseline(bot, "100"))
+    await member_list_entered.wait()
+    event = FakeEvent(
+        raw={
+            "post_type": "notice",
+            "notice_type": "group_increase",
+            "group_id": 100,
+            "user_id": 222,
+            "self_id": 999,
+        },
+        bot=bot,
+    )
+    event_task = asyncio.create_task(reloaded.handle_aiocqhttp_event(event))
+    while "222" not in reloaded._pending_group_increases.get("100", set()):
+        await asyncio.sleep(0)
+    release_member_list.set()
+    await asyncio.gather(sync_task, event_task)
+
+    assert await reloaded.storage.is_eligible("100", "222") is True
+    assert len(event.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -324,13 +428,16 @@ async def test_claim_sends_temporary_chat_and_consumes_code(plugin):
 
 @pytest.mark.asyncio
 async def test_claim_failure_guides_user_and_retry_can_succeed(plugin):
+    class ActionFailed(RuntimeError):
+        retcode = 1200
+
     await plugin.storage.record_group_baseline("100", [])
     assert await plugin.storage.register_newcomer("100", "200") == "eligible"
     plugin._ready_group_ids.add("100")
     await plugin.storage.import_codes(["WELCOME-001"])
     failed_event = FakeEvent(
         messages=[Comp.At(qq="999"), Comp.Plain("领取新人礼")],
-        bot=FakeBot(TimeoutError("timeout")),
+        bot=FakeBot(ActionFailed("rejected")),
     )
 
     await plugin.handle_aiocqhttp_event(failed_event)
@@ -352,6 +459,26 @@ async def test_claim_failure_guides_user_and_retry_can_succeed(plugin):
     assert retry_event.sent == ["新人礼已通过群临时会话发送，请查收。"]
     assert (await plugin.storage.summary())["available_codes"] == 0
     assert (await plugin.storage.summary())["claimed_users"] == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_timeout_freezes_code_for_manual_review(plugin):
+    await plugin.storage.record_group_baseline("100", [])
+    assert await plugin.storage.register_newcomer("100", "200") == "eligible"
+    plugin._ready_group_ids.add("100")
+    await plugin.storage.import_codes(["WELCOME-REVIEW"])
+    event = FakeEvent(
+        messages=[Comp.At(qq="999"), Comp.Plain("领取新人礼")],
+        bot=FakeBot(TimeoutError("timeout")),
+    )
+
+    await plugin.handle_aiocqhttp_event(event)
+
+    assert "发送结果暂时无法确认" in event.sent[0]
+    summary = await plugin.storage.summary()
+    assert summary["available_codes"] == 0
+    assert summary["gift_manual_reviews"] == 1
+    assert summary["claimed_users"] == 0
 
 
 @pytest.mark.asyncio
@@ -582,3 +709,130 @@ async def test_scheduler_filters_lottery_participants_who_left_group(
     winners = await plugin.lottery_storage.winners(int(activity["id"]))
     assert [winner["user_id"] for winner in winners] == ["200"]
     assert any(action == "send_group_msg" for action, _ in bot.calls)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_delays_draw_when_member_list_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    bot = FakeBot(action_results={"get_group_member_list": []})
+    plugin = TransferStationPlugin(
+        FakeContext(bot),
+        {"lottery_enabled": True},
+    )
+    fake_newapi = FakeNewApi()
+    plugin._newapi_client = fake_newapi
+    start = campaign_utils.utc_now() - timedelta(hours=2)
+    activity = await plugin.lottery_storage.create_draft(
+        "100",
+        "空成员列表延迟开奖",
+        "1",
+        now=start,
+    )
+    await plugin.lottery_storage.add_prize("100", "奖品", 1, "1")
+    await plugin.lottery_storage.publish(
+        "100",
+        await fake_newapi.status_snapshot(),
+        now=start,
+    )
+    await plugin.lottery_storage.register(
+        "100",
+        "200",
+        "参与抽奖",
+        now=start + timedelta(minutes=1),
+    )
+
+    await plugin._campaign_scheduler_once()
+
+    current = await plugin.lottery_storage.get_activity(int(activity["id"]))
+    assert current["status"] == "open"
+    assert await plugin.lottery_storage.winners(int(activity["id"])) == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_lottery_does_not_flush_old_group_notifications(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    bot = FakeBot()
+    plugin = TransferStationPlugin(
+        FakeContext(bot),
+        {
+            "lottery_enabled": False,
+            "compensation_enabled": True,
+        },
+    )
+    now = campaign_utils.utc_now()
+    await plugin.lottery_storage.create_draft("100", "旧通知", "1", now=now)
+    await plugin.lottery_storage.add_prize("100", "奖品", 1, "1")
+    await plugin.lottery_storage.publish(
+        "100",
+        await FakeNewApi().status_snapshot(),
+        now=now,
+    )
+
+    await plugin._campaign_scheduler_once()
+
+    assert not any(action == "send_group_msg" for action, _ in bot.calls)
+    assert (await plugin.lottery_storage.list_pending_notifications())[0][
+        "event_key"
+    ] == "lottery_published"
+
+
+@pytest.mark.asyncio
+async def test_terminate_cannot_leave_or_restart_campaign_scheduler(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {"lottery_enabled": True},
+    )
+    await plugin.initialize()
+    assert plugin._campaign_task is not None
+
+    callback = asyncio.create_task(plugin._reconcile_campaign_scheduler())
+    await plugin.terminate()
+    await callback
+
+    assert plugin._campaign_task is None
+    assert plugin._plugin_initialized is False
+    assert plugin._terminating is True
+
+
+@pytest.mark.asyncio
+async def test_terminate_waits_for_initialize_and_leaves_no_background_tasks(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {"lottery_enabled": True},
+    )
+    initialize_entered = asyncio.Event()
+    release_initialize = asyncio.Event()
+    original_initialize = plugin.storage.initialize
+
+    async def blocked_initialize():
+        initialize_entered.set()
+        await release_initialize.wait()
+        await original_initialize()
+
+    monkeypatch.setattr(plugin.storage, "initialize", blocked_initialize)
+    initialize_task = asyncio.create_task(plugin.initialize())
+    await initialize_entered.wait()
+    terminate_task = asyncio.create_task(plugin.terminate())
+    await asyncio.sleep(0)
+    assert terminate_task.done() is False
+
+    release_initialize.set()
+    await asyncio.gather(initialize_task, terminate_task)
+
+    assert plugin._plugin_initialized is False
+    assert plugin._terminating is True
+    assert plugin._baseline_task is None
+    assert plugin._campaign_task is None
+    assert plugin._processing_recovery_task is None
+    assert plugin._gift_recovery_task is None

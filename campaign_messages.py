@@ -4,12 +4,13 @@ CAMPAIGN_TEXT_DEFAULTS = {
     "campaign_group_required": "该功能只能在 QQ 群内使用。",
     "campaign_feature_disabled": "当前群未启用该功能。",
     "campaign_invalid_argument": "参数格式错误，请发送对应的帮助指令查看用法。",
+    "campaign_rate_limited": "操作过于频繁，请稍后再提交 New API 用户 ID。",
     "newapi_test_success": (
         "New API 连接测试成功。\n"
         "版本：{version}\n账号：{username}\n角色：{role}\n额度显示：{display_type}"
     ),
-    "newapi_error": "New API 操作失败：{error}",
-    "newapi_user_error": "New API 用户校验失败：{error}",
+    "newapi_error": "New API 服务暂不可用，请稍后再试或联系管理员。",
+    "newapi_user_error": "New API 用户校验失败，请确认用户 ID 正确且账号已启用。",
     "lottery_help": (
         "抽奖管理指令：\n"
         "/抽奖 创建 <标题>\n"
@@ -84,7 +85,7 @@ CAMPAIGN_TEXT_DEFAULTS = {
         "抽奖奖励发放成功。活动：{activity}，额度：{amount}，"
         "New API ID：{user_id}，用户名：{username}，流水号：{serial}"
     ),
-    "lottery_payout_failed": "抽奖奖励发放失败：{error}。资格已释放，可重新提交。",
+    "lottery_payout_failed": "抽奖奖励发放失败。资格已释放，可重新提交。",
     "lottery_manual_review": (
         "New API 返回结果不明确，已冻结中奖资格且不会自动重试。"
         "请管理员核查流水号：{serial}"
@@ -130,13 +131,14 @@ CAMPAIGN_TEXT_DEFAULTS = {
         "补偿发放成功。活动：{activity}，额度：{amount}，"
         "New API ID：{user_id}，用户名：{username}，流水号：{serial}"
     ),
-    "comp_payout_failed": "补偿发放失败：{error}。占用已释放，可重新提交。",
+    "comp_payout_failed": "补偿发放失败。占用已释放，可重新提交。",
     "comp_manual_review": (
         "New API 返回结果不明确，已冻结本次资格和预算且不会自动重试。"
         "请管理员核查流水号：{serial}"
     ),
     "comp_closed": "补偿 #{activity_id}“{title}”已关闭。原因：{reason}",
     "comp_auto_closed": "补偿“{title}”已到结束时间，本场活动现已关闭。",
+    "comp_budget_closed": "补偿“{title}”的总预算已耗尽，本场活动现已关闭。",
     "comp_review_not_found": "没有找到需要核查的补偿流水号。",
     "comp_review_success": "补偿流水 {serial} 已核查为成功并完成记账。",
     "comp_review_failed": "补偿流水 {serial} 已核查为失败并释放资格。",

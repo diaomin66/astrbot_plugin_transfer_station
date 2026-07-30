@@ -38,6 +38,7 @@ async def test_import_summary_and_persistence(tmp_path):
         "pending_newcomers": 1,
         "known_users": 3,
         "today_newcomers": 1,
+        "gift_manual_reviews": 0,
     }
 
     reloaded = GiftStorage(db_path)
@@ -101,10 +102,43 @@ async def test_failed_delivery_rolls_back_inventory_and_claim(tmp_path):
         send_code=sender,
     )
 
-    assert outcome.status == "send_failed"
+    assert outcome.status == "send_ambiguous"
     assert outcome.error_type == "TimeoutError"
-    assert (await storage.list_codes(1, 20))["items"][0]["code"] == "ROLLBACK-CODE"
+    assert (await storage.list_codes(1, 20))["total"] == 0
     assert (await storage.list_claims(1, 20))["total"] == 0
+    reviews = await storage.list_gift_reviews(1, 20)
+    assert reviews["total"] == 1
+    assert await storage.review_gift_delivery(
+        reviews["items"][0]["id"],
+        delivered=False,
+    )
+    assert (await storage.list_codes(1, 20))["items"][0]["code"] == "ROLLBACK-CODE"
+
+
+@pytest.mark.asyncio
+async def test_clear_delivery_failure_does_not_claim_false_rollback_after_recovery(
+    tmp_path,
+):
+    class ActionFailed(RuntimeError):
+        retcode = 1200
+
+    storage = GiftStorage(tmp_path / "gifts.db")
+    await register_newcomer(storage, "100", "200")
+    await storage.import_codes(["FROZEN-CODE"])
+
+    async def sender(_code: str) -> None:
+        await storage.recover_reserved(stale_before="9999-12-31T23:59:59+00:00")
+        raise ActionFailed("rejected")
+
+    outcome = await storage.claim_code(
+        group_id="100",
+        user_id="200",
+        send_code=sender,
+    )
+
+    assert outcome.status == "send_ambiguous"
+    assert (await storage.summary())["gift_manual_reviews"] == 1
+    assert (await storage.summary())["available_codes"] == 0
 
 
 @pytest.mark.asyncio
@@ -141,10 +175,13 @@ async def test_concurrent_claims_cannot_share_last_code(tmp_path):
     assert await storage.register_newcomer("100", "202") == "eligible"
     await storage.import_codes(["LAST-CODE"])
     sent: list[tuple[str, str]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
 
     async def claim(user_id: str):
         async def sender(code: str) -> None:
-            await asyncio.sleep(0.01)
+            entered.set()
+            await release.wait()
             sent.append((user_id, code))
 
         return await storage.claim_code(
@@ -153,11 +190,50 @@ async def test_concurrent_claims_cannot_share_last_code(tmp_path):
             send_code=sender,
         )
 
-    outcomes = await asyncio.gather(claim("201"), claim("202"))
+    first_task = asyncio.create_task(claim("201"))
+    await entered.wait()
+    second_outcome = await claim("202")
+    release.set()
+    outcomes = [await first_task, second_outcome]
 
     assert sorted(outcome.status for outcome in outcomes) == ["no_codes", "success"]
     assert len(sent) == 1
     assert (await storage.summary())["available_codes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_two_storage_instances_cannot_share_last_code(tmp_path):
+    db_path = tmp_path / "gifts.db"
+    first = GiftStorage(db_path)
+    second = GiftStorage(db_path)
+    await first.record_group_baseline("100", [])
+    assert await first.register_newcomer("100", "201") == "eligible"
+    assert await first.register_newcomer("100", "202") == "eligible"
+    await first.import_codes(["LAST-CROSS-INSTANCE"])
+    sent: list[tuple[str, str]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def claim(storage: GiftStorage, user_id: str):
+        async def sender(code: str) -> None:
+            entered.set()
+            await release.wait()
+            sent.append((user_id, code))
+
+        return await storage.claim_code(
+            group_id="100",
+            user_id=user_id,
+            send_code=sender,
+        )
+
+    first_task = asyncio.create_task(claim(first, "201"))
+    await entered.wait()
+    second_outcome = await claim(second, "202")
+    release.set()
+    outcomes = [await first_task, second_outcome]
+    assert sorted(outcome.status for outcome in outcomes) == ["no_codes", "success"]
+    assert len(sent) == 1
+    assert sent[0][1] == "LAST-CROSS-INSTANCE"
 
 
 @pytest.mark.asyncio
@@ -174,7 +250,7 @@ async def test_baseline_and_known_users_cannot_gain_new_eligibility(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_schema_v2_migrates_legacy_ids_as_permanently_known(tmp_path):
+async def test_schema_v1_migrates_legacy_ids_as_permanently_known(tmp_path):
     db_path = tmp_path / "gifts.db"
     with sqlite3.connect(db_path) as db:
         db.executescript(
@@ -218,3 +294,49 @@ async def test_schema_v2_migrates_legacy_ids_as_permanently_known(tmp_path):
     assert await storage.register_newcomer("100", "200") == "known"
     assert await storage.register_newcomer("100", "201") == "known"
     assert await storage.is_eligible("100", "200") is False
+
+
+@pytest.mark.asyncio
+async def test_schema_v2_migrates_reserved_delivery_to_manual_review(tmp_path):
+    db_path = tmp_path / "gifts.db"
+    storage = GiftStorage(db_path)
+    await register_newcomer(storage, "100", "200")
+    await storage.import_codes(["CRASH-CODE"])
+    reservation = await storage._reserve_claim("100", "200")
+    assert isinstance(reservation, dict)
+
+    with sqlite3.connect(db_path) as db:
+        db.execute("PRAGMA user_version = 2")
+        db.execute(
+            """
+            INSERT INTO schema_meta(key, value)
+            VALUES ('schema_version', '2')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+
+    reloaded = GiftStorage(db_path)
+    await reloaded.initialize()
+    await reloaded.recover_reserved(stale_before="9999-12-31T23:59:59+00:00")
+    reviews = await reloaded.list_gift_reviews(1, 20)
+    assert reviews["total"] == 1
+    assert reviews["items"][0]["error_type"] == "ProcessRestarted"
+
+    async def must_not_send(_code: str) -> None:
+        raise AssertionError("reserved delivery must remain frozen")
+
+    outcome = await reloaded.claim_code(
+        group_id="100",
+        user_id="200",
+        send_code=must_not_send,
+    )
+    assert outcome.status == "send_ambiguous"
+
+
+@pytest.mark.asyncio
+async def test_future_database_version_is_rejected(tmp_path):
+    db_path = tmp_path / "future.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute("PRAGMA user_version = 999")
+    with pytest.raises(RuntimeError, match="版本高于"):
+        await GiftStorage(db_path).initialize()

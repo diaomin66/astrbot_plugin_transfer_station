@@ -53,6 +53,12 @@
     "default": "机器人暂时无法主动发起群临时会话。请先主动私聊机器人发送任意消息建立会话，然后回到本群重新 @机器人并发送“{claim_phrase}”。本次兑换码已退回库存。",
     "hint": "支持 {claim_phrase} 占位符；用户主动建立会话后可回群重新领取。"
   },
+  "gift_manual_review_content": {
+    "description": "新人礼发送结果待核查提示",
+    "type": "text",
+    "default": "新人礼发送结果暂时无法确认，兑换码已冻结且不会重复发放。请联系管理员在新人礼管理页面核查。",
+    "hint": "发送超时、任务取消或发送成功后的本地记账异常时回复。"
+  },
   "baseline_pending_content": {
     "description": "成员基线未完成提示",
     "type": "text",
@@ -78,498 +84,510 @@
     "hint": "开启后，欢迎消息会先 @新入群成员。"
   },
   "newapi_base_url": {
-    "description": "New API ????",
+    "description": "New API 站点地址",
     "type": "string",
     "default": "",
-    "hint": "???? HTTPS??? https://newapi.example.com?"
+    "hint": "填写 New API 站点根地址，推荐使用 HTTPS，例如：https://newapi.example.com。"
   },
   "newapi_access_token": {
-    "description": "New API ???????",
+    "description": "New API 管理员访问令牌",
     "type": "string",
     "default": "",
-    "hint": "?????????????????????????? API Key?",
+    "hint": "优先使用具备管理员或超管权限的访问令牌；请勿填写普通用户 API Key。",
     "obvious_hint": true
   },
   "newapi_username": {
-    "description": "New API ??????",
+    "description": "New API 管理员用户名",
     "type": "string",
     "default": "",
-    "hint": "????????????????"
+    "hint": "仅在未配置访问令牌时用于兼容登录。"
   },
   "newapi_password": {
-    "description": "New API ?????",
+    "description": "New API 管理员密码",
     "type": "string",
     "default": "",
-    "hint": "?????????????? 2FA ????????????",
+    "hint": "仅在未配置访问令牌时使用；启用 2FA 的账号请改用访问令牌。",
     "obvious_hint": true
   },
   "newapi_timeout_seconds": {
-    "description": "New API ??????",
+    "description": "New API 请求超时（秒）",
     "type": "int",
     "default": 10,
-    "hint": "???? 1 ? 120 ??"
+    "hint": "允许填写 1 到 120 秒。"
   },
   "newapi_verify_ssl": {
-    "description": "?? New API TLS ??",
+    "description": "验证 New API TLS 证书",
     "type": "bool",
     "default": true,
-    "hint": "???????????"
+    "hint": "生产环境建议保持开启。"
   },
   "newapi_allow_insecure_http": {
-    "description": "????? HTTP",
+    "description": "允许不安全的 HTTP 连接",
     "type": "bool",
     "default": false,
-    "hint": "??????????????????????",
+    "hint": "仅限可信内网测试；公网或生产环境不应开启。",
     "obvious_hint": true
   },
   "lottery_enabled": {
-    "description": "??????",
+    "description": "启用抽奖系统",
     "type": "bool",
     "default": false,
-    "hint": "???????????????????"
+    "hint": "开启后才处理抽奖管理指令、用户报名与定时开奖。"
   },
   "lottery_enabled_group_ids": {
-    "description": "????????",
+    "description": "抽奖群白名单",
     "type": "list",
     "default": [],
-    "hint": "??????? QQ ??"
+    "hint": "填写允许使用抽奖系统的 QQ 群号；留空表示全部 QQ 群。"
   },
   "compensation_enabled": {
-    "description": "??????",
+    "description": "启用补偿系统",
     "type": "bool",
     "default": false,
-    "hint": "???????????????????"
+    "hint": "开启后才处理补偿管理指令、用户领取与自动结束。"
   },
   "compensation_enabled_group_ids": {
-    "description": "????????",
+    "description": "补偿群白名单",
     "type": "list",
     "default": [],
-    "hint": "??????? QQ ??"
+    "hint": "填写允许使用补偿系统的 QQ 群号；留空表示全部 QQ 群。"
   },
   "campaign_group_required_content": {
-    "description": "??????campaign_group_required",
+    "description": "机器人回复文案：该功能只能在 QQ 群内使用。",
     "type": "string",
     "default": "该功能只能在 QQ 群内使用。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "campaign_feature_disabled_content": {
-    "description": "??????campaign_feature_disabled",
+    "description": "机器人回复文案：当前群未启用该功能。",
     "type": "string",
     "default": "当前群未启用该功能。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "campaign_invalid_argument_content": {
-    "description": "??????campaign_invalid_argument",
+    "description": "机器人回复文案：参数格式错误，请发送对应的帮助指令查看用法。",
     "type": "string",
     "default": "参数格式错误，请发送对应的帮助指令查看用法。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
+  },
+  "campaign_rate_limited_content": {
+    "description": "机器人回复文案：操作过于频繁",
+    "type": "string",
+    "default": "操作过于频繁，请稍后再提交 New API 用户 ID。",
+    "hint": "用户短时间重复查询 New API 用户时发送。"
   },
   "newapi_test_success_content": {
-    "description": "??????newapi_test_success",
+    "description": "机器人回复文案：New API 连接测试成功。",
     "type": "text",
     "default": "New API 连接测试成功。\n版本：{version}\n账号：{username}\n角色：{role}\n额度显示：{display_type}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{display_type}、{role}、{username}、{version}。"
   },
   "newapi_error_content": {
-    "description": "??????newapi_error",
+    "description": "机器人回复文案：New API 服务暂不可用，请稍后再试或联系管理员。",
     "type": "string",
-    "default": "New API 操作失败：{error}",
-    "hint": "?????????????????"
+    "default": "New API 服务暂不可用，请稍后再试或联系管理员。",
+    "hint": "New API 配置或连接不可用时发送，不回显上游原始错误。"
   },
   "newapi_user_error_content": {
-    "description": "??????newapi_user_error",
+    "description": "机器人回复文案：New API 用户校验失败，请确认用户 ID 正确且账号已启用。",
     "type": "string",
-    "default": "New API 用户校验失败：{error}",
-    "hint": "?????????????????"
+    "default": "New API 用户校验失败，请确认用户 ID 正确且账号已启用。",
+    "hint": "用户 ID 不存在、已停用或上游拒绝查询时发送，不回显上游原始错误。"
   },
   "lottery_help_content": {
-    "description": "??????lottery_help",
+    "description": "机器人回复文案：抽奖管理指令：",
     "type": "text",
     "default": "抽奖管理指令：\n/抽奖 创建 <标题>\n/抽奖 时间 <开始时间> <开奖时间>\n/抽奖 口令 <报名关键词>\n/抽奖 描述 <内容>\n/抽奖 奖项添加 <奖项名> <人数> <额度>\n/抽奖 奖项删除 <序号>\n/抽奖 领奖时限 <时长>\n/抽奖 发布\n/抽奖 状态\n/抽奖 参与者 [页码]\n/抽奖 提前开奖\n/抽奖 取消 [原因]\n/抽奖 核查 <流水号> <成功|失败>",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_invalid_argument_content": {
-    "description": "??????lottery_invalid_argument",
+    "description": "机器人回复文案：抽奖指令参数错误，请发送 /抽奖 帮助。",
     "type": "string",
     "default": "抽奖指令参数错误，请发送 /抽奖 帮助。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_active_exists_content": {
-    "description": "??????lottery_active_exists",
+    "description": "机器人回复文案：本群已有一场未结束的抽奖活动。",
     "type": "string",
     "default": "本群已有一场未结束的抽奖活动。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_created_content": {
-    "description": "??????lottery_created",
+    "description": "机器人回复文案：抽奖草稿已创建（#{activity_id}）：{title}",
     "type": "text",
     "default": "抽奖草稿已创建（#{activity_id}）：{title}\n开始：{start_time}\n开奖：{draw_time}\n报名口令：{keyword}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity_id}、{draw_time}、{keyword}、{start_time}、{title}。"
   },
   "lottery_no_draft_content": {
-    "description": "??????lottery_no_draft",
+    "description": "机器人回复文案：本群没有可编辑的抽奖草稿。",
     "type": "string",
     "default": "本群没有可编辑的抽奖草稿。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_updated_content": {
-    "description": "??????lottery_updated",
+    "description": "机器人回复文案：抽奖草稿已更新。",
     "type": "string",
     "default": "抽奖草稿已更新。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_prize_added_content": {
-    "description": "??????lottery_prize_added",
+    "description": "机器人回复文案：已添加奖项 {position}：{prize_name} ×{winn…",
     "type": "string",
     "default": "已添加奖项 {position}：{prize_name} ×{winner_count}，额度 {amount}。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{amount}、{position}、{prize_name}、{winner_count}。"
   },
   "lottery_prize_deleted_content": {
-    "description": "??????lottery_prize_deleted",
+    "description": "机器人回复文案：已删除第 {position} 个奖项。",
     "type": "string",
     "default": "已删除第 {position} 个奖项。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{position}。"
   },
   "lottery_prize_not_found_content": {
-    "description": "??????lottery_prize_not_found",
+    "description": "机器人回复文案：没有找到第 {position} 个奖项。",
     "type": "string",
     "default": "没有找到第 {position} 个奖项。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{position}。"
   },
   "lottery_invalid_time_content": {
-    "description": "??????lottery_invalid_time",
+    "description": "机器人回复文案：开奖时间必须晚于开始时间。",
     "type": "string",
     "default": "开奖时间必须晚于开始时间。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_no_prizes_content": {
-    "description": "??????lottery_no_prizes",
+    "description": "机器人回复文案：发布前至少需要添加一个奖项。",
     "type": "string",
     "default": "发布前至少需要添加一个奖项。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_published_content": {
-    "description": "??????lottery_published",
+    "description": "机器人回复文案：抽奖活动已发布（#{activity_id}）：{title}",
     "type": "text",
     "default": "抽奖活动已发布（#{activity_id}）：{title}\n简介：{description}\n报名时间：{start_time} 至 {draw_time}\n报名方式：@机器人 {keyword}\n奖项：\n{prizes}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity_id}、{description}、{draw_time}、{keyword}、{prizes}、{start_time}、{title}。"
   },
   "lottery_no_active_content": {
-    "description": "??????lottery_no_active",
+    "description": "机器人回复文案：本群当前没有未结束的抽奖活动。",
     "type": "string",
     "default": "本群当前没有未结束的抽奖活动。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_status_content": {
-    "description": "??????lottery_status",
+    "description": "机器人回复文案：抽奖 #{activity_id}：{title}",
     "type": "text",
     "default": "抽奖 #{activity_id}：{title}\n状态：{status}\n简介：{description}\n开始：{start_time}\n开奖：{draw_time}\n领奖截止：{claim_deadline}\n报名口令：{keyword}\n参与人数：{participant_count}\n奖项：\n{prizes}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity_id}、{claim_deadline}、{description}、{draw_time}、{keyword}、{participant_count}、{prizes}、{start_time}、{status}、{title}。"
   },
   "lottery_participants_content": {
-    "description": "??????lottery_participants",
+    "description": "机器人回复文案：抽奖参与者（第 {page} 页，共 {total} 人）：",
     "type": "text",
     "default": "抽奖参与者（第 {page} 页，共 {total} 人）：\n{participants}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{page}、{participants}、{total}。"
   },
   "lottery_opened_content": {
-    "description": "??????lottery_opened",
+    "description": "机器人回复文案：抽奖“{title}”现已开始，请发送：@机器人 {keyword}",
     "type": "string",
     "default": "抽奖“{title}”现已开始，请发送：@机器人 {keyword}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{keyword}、{title}。"
   },
   "lottery_joined_content": {
-    "description": "??????lottery_joined",
+    "description": "机器人回复文案：报名成功，请等待开奖。",
     "type": "string",
     "default": "报名成功，请等待开奖。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_already_joined_content": {
-    "description": "??????lottery_already_joined",
+    "description": "机器人回复文案：你已经参加过本场抽奖。",
     "type": "string",
     "default": "你已经参加过本场抽奖。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_not_open_content": {
-    "description": "??????lottery_not_open",
+    "description": "机器人回复文案：当前没有可报名或可领奖的抽奖活动。",
     "type": "string",
     "default": "当前没有可报名或可领奖的抽奖活动。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_member_list_failed_content": {
-    "description": "??????lottery_member_list_failed",
+    "description": "机器人回复文案：群成员列表读取失败，开奖已延迟，稍后会自动重试。",
     "type": "string",
     "default": "群成员列表读取失败，开奖已延迟，稍后会自动重试。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_no_winner_content": {
-    "description": "??????lottery_no_winner",
+    "description": "机器人回复文案：抽奖“{title}”已开奖，但没有符合条件的参与者。",
     "type": "string",
     "default": "抽奖“{title}”已开奖，但没有符合条件的参与者。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{title}。"
   },
   "lottery_drawn_content": {
-    "description": "??????lottery_drawn",
+    "description": "机器人回复文案：抽奖“{title}”开奖结果：",
     "type": "text",
     "default": "抽奖“{title}”开奖结果：\n{winners}\n领奖截止：{claim_deadline}\n中奖者请发送：@机器人 抽奖 <New API用户ID>",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{claim_deadline}、{title}、{winners}。"
   },
   "lottery_not_winner_content": {
-    "description": "??????lottery_not_winner",
+    "description": "机器人回复文案：你不是当前抽奖的中奖者。",
     "type": "string",
     "default": "你不是当前抽奖的中奖者。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_claim_expired_content": {
-    "description": "??????lottery_claim_expired",
+    "description": "机器人回复文案：该中奖资格已经超过领奖期限。",
     "type": "string",
     "default": "该中奖资格已经超过领奖期限。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_confirmation_exists_content": {
-    "description": "??????lottery_confirmation_exists",
+    "description": "机器人回复文案：你已有待确认的抽奖领奖申请。",
     "type": "string",
     "default": "你已有待确认的抽奖领奖申请。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_processing_content": {
-    "description": "??????lottery_processing",
+    "description": "机器人回复文案：该中奖资格正在发放中，请勿重复操作。",
     "type": "string",
     "default": "该中奖资格正在发放中，请勿重复操作。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_already_paid_content": {
-    "description": "??????lottery_already_paid",
+    "description": "机器人回复文案：该中奖资格已经成功发放。",
     "type": "string",
     "default": "该中奖资格已经成功发放。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_manual_review_locked_content": {
-    "description": "??????lottery_manual_review_locked",
+    "description": "机器人回复文案：该中奖资格正在人工核查，暂时不能重复申请。",
     "type": "string",
     "default": "该中奖资格正在人工核查，暂时不能重复申请。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_confirmation_content": {
-    "description": "??????lottery_confirmation",
+    "description": "机器人回复文案：请确认抽奖领奖信息：",
     "type": "text",
     "default": "请确认抽奖领奖信息：\n活动：{activity}\n奖项：{prize}\n额度：{amount}\nNew API ID：{user_id}\n用户名：{username}\n确认有效至：{expires_at}\n发送：@机器人 确认 抽奖\n或：@机器人 取消 抽奖",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity}、{amount}、{expires_at}、{prize}、{user_id}、{username}。"
   },
   "lottery_confirmation_expired_content": {
-    "description": "??????lottery_confirmation_expired",
+    "description": "机器人回复文案：抽奖领奖确认已过期，请重新提交 New API 用户 ID。",
     "type": "string",
     "default": "抽奖领奖确认已过期，请重新提交 New API 用户 ID。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_no_confirmation_content": {
-    "description": "??????lottery_no_confirmation",
+    "description": "机器人回复文案：没有找到可确认的抽奖领奖申请。",
     "type": "string",
     "default": "没有找到可确认的抽奖领奖申请。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_confirmation_cancelled_content": {
-    "description": "??????lottery_confirmation_cancelled",
+    "description": "机器人回复文案：已取消本次抽奖领奖确认，你可以在期限内重新提交。",
     "type": "string",
     "default": "已取消本次抽奖领奖确认，你可以在期限内重新提交。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_paid_content": {
-    "description": "??????lottery_paid",
+    "description": "机器人回复文案：抽奖奖励发放成功。活动：{activity}，额度：{amount}，N…",
     "type": "string",
     "default": "抽奖奖励发放成功。活动：{activity}，额度：{amount}，New API ID：{user_id}，用户名：{username}，流水号：{serial}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity}、{amount}、{serial}、{user_id}、{username}。"
   },
   "lottery_payout_failed_content": {
-    "description": "??????lottery_payout_failed",
+    "description": "机器人回复文案：抽奖奖励发放失败。资格已释放，可重新提交。",
     "type": "string",
-    "default": "抽奖奖励发放失败：{error}。资格已释放，可重新提交。",
-    "hint": "?????????????????"
+    "default": "抽奖奖励发放失败。资格已释放，可重新提交。",
+    "hint": "New API 明确拒绝发放且中奖资格已释放时发送。"
   },
   "lottery_manual_review_content": {
-    "description": "??????lottery_manual_review",
+    "description": "机器人回复文案：New API 返回结果不明确，已冻结中奖资格且不会自动重试。请管理员核…",
     "type": "string",
     "default": "New API 返回结果不明确，已冻结中奖资格且不会自动重试。请管理员核查流水号：{serial}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{serial}。"
   },
   "lottery_cancelled_content": {
-    "description": "??????lottery_cancelled",
+    "description": "机器人回复文案：抽奖 #{activity_id}“{title}”已取消。原因：{re…",
     "type": "string",
     "default": "抽奖 #{activity_id}“{title}”已取消。原因：{reason}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity_id}、{reason}、{title}。"
   },
   "lottery_claim_closed_content": {
-    "description": "??????lottery_claim_closed",
+    "description": "机器人回复文案：抽奖“{title}”领奖时间已结束，未领取资格已作废。",
     "type": "string",
     "default": "抽奖“{title}”领奖时间已结束，未领取资格已作废。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{title}。"
   },
   "lottery_review_not_found_content": {
-    "description": "??????lottery_review_not_found",
+    "description": "机器人回复文案：没有找到需要核查的抽奖流水号。",
     "type": "string",
     "default": "没有找到需要核查的抽奖流水号。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_review_success_content": {
-    "description": "??????lottery_review_success",
+    "description": "机器人回复文案：抽奖流水 {serial} 已核查为成功并完成记账。",
     "type": "string",
     "default": "抽奖流水 {serial} 已核查为成功并完成记账。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{serial}。"
   },
   "lottery_review_failed_content": {
-    "description": "??????lottery_review_failed",
+    "description": "机器人回复文案：抽奖流水 {serial} 已核查为失败并释放资格。",
     "type": "string",
     "default": "抽奖流水 {serial} 已核查为失败并释放资格。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{serial}。"
   },
   "comp_help_content": {
-    "description": "??????comp_help",
+    "description": "机器人回复文案：补偿管理指令：",
     "type": "text",
     "default": "补偿管理指令：\n/补偿 开启 <每人额度> <持续时间|-> <总金额|-> [标题]\n/补偿 状态\n/补偿 记录 [页码]\n/补偿 关闭 [原因]\n/补偿 核查 <流水号> <成功|失败>",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_invalid_argument_content": {
-    "description": "??????comp_invalid_argument",
+    "description": "机器人回复文案：补偿指令参数错误，请发送 /补偿 帮助。",
     "type": "string",
     "default": "补偿指令参数错误，请发送 /补偿 帮助。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_active_exists_content": {
-    "description": "??????comp_active_exists",
+    "description": "机器人回复文案：本群已有一场进行中的补偿活动。",
     "type": "string",
     "default": "本群已有一场进行中的补偿活动。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_budget_too_small_content": {
-    "description": "??????comp_budget_too_small",
+    "description": "机器人回复文案：补偿总金额不足以发放一份完整补偿。",
     "type": "string",
     "default": "补偿总金额不足以发放一份完整补偿。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_opened_content": {
-    "description": "??????comp_opened",
+    "description": "机器人回复文案：补偿活动已开启（#{activity_id}）：{title}",
     "type": "text",
     "default": "补偿活动已开启（#{activity_id}）：{title}\n每人：{amount}\n结束时间：{end_time}\n总预算：{total_budget}\n领取方式：@机器人 补偿 <New API用户ID>",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity_id}、{amount}、{end_time}、{title}、{total_budget}。"
   },
   "comp_no_active_content": {
-    "description": "??????comp_no_active",
+    "description": "机器人回复文案：本群当前没有进行中的补偿活动。",
     "type": "string",
     "default": "本群当前没有进行中的补偿活动。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_status_content": {
-    "description": "??????comp_status",
+    "description": "机器人回复文案：补偿 #{activity_id}：{title}",
     "type": "text",
     "default": "补偿 #{activity_id}：{title}\n每人：{amount}\n结束时间：{end_time}\n总预算：{total_budget}\n剩余预算：{remaining_budget}\n记录数：{records}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity_id}、{amount}、{end_time}、{records}、{remaining_budget}、{title}、{total_budget}。"
   },
   "comp_records_content": {
-    "description": "??????comp_records",
+    "description": "机器人回复文案：补偿记录（第 {page} 页，共 {total} 条）：",
     "type": "text",
     "default": "补偿记录（第 {page} 页，共 {total} 条）：\n{records}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{page}、{records}、{total}。"
   },
   "comp_ended_content": {
-    "description": "??????comp_ended",
+    "description": "机器人回复文案：本场补偿已经结束。",
     "type": "string",
     "default": "本场补偿已经结束。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_duplicate_content": {
-    "description": "??????comp_duplicate",
+    "description": "机器人回复文案：本场补偿中，该 QQ 或 New API ID 已领取或正在处理中。",
     "type": "string",
     "default": "本场补偿中，该 QQ 或 New API ID 已领取或正在处理中。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_confirmation_content": {
-    "description": "??????comp_confirmation",
+    "description": "机器人回复文案：请确认补偿领取信息：",
     "type": "text",
     "default": "请确认补偿领取信息：\n活动：{activity}\n额度：{amount}\nNew API ID：{user_id}\n用户名：{username}\n确认有效至：{expires_at}\n发送：@机器人 确认 补偿\n或：@机器人 取消 补偿",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity}、{amount}、{expires_at}、{user_id}、{username}。"
   },
   "comp_confirmation_expired_content": {
-    "description": "??????comp_confirmation_expired",
+    "description": "机器人回复文案：补偿确认已过期，请重新提交 New API 用户 ID。",
     "type": "string",
     "default": "补偿确认已过期，请重新提交 New API 用户 ID。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_no_confirmation_content": {
-    "description": "??????comp_no_confirmation",
+    "description": "机器人回复文案：没有找到可确认的补偿申请。",
     "type": "string",
     "default": "没有找到可确认的补偿申请。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_confirmation_cancelled_content": {
-    "description": "??????comp_confirmation_cancelled",
+    "description": "机器人回复文案：已取消本次补偿确认，你可以在活动结束前重新提交。",
     "type": "string",
     "default": "已取消本次补偿确认，你可以在活动结束前重新提交。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_budget_insufficient_content": {
-    "description": "??????comp_budget_insufficient",
+    "description": "机器人回复文案：剩余预算不足一份完整补偿，本场补偿已自动结束。",
     "type": "string",
     "default": "剩余预算不足一份完整补偿，本场补偿已自动结束。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_paid_content": {
-    "description": "??????comp_paid",
+    "description": "机器人回复文案：补偿发放成功。活动：{activity}，额度：{amount}，New…",
     "type": "string",
     "default": "补偿发放成功。活动：{activity}，额度：{amount}，New API ID：{user_id}，用户名：{username}，流水号：{serial}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity}、{amount}、{serial}、{user_id}、{username}。"
   },
   "comp_payout_failed_content": {
-    "description": "??????comp_payout_failed",
+    "description": "机器人回复文案：补偿发放失败。占用已释放，可重新提交。",
     "type": "string",
-    "default": "补偿发放失败：{error}。占用已释放，可重新提交。",
-    "hint": "?????????????????"
+    "default": "补偿发放失败。占用已释放，可重新提交。",
+    "hint": "New API 明确拒绝发放且补偿占用已释放时发送。"
   },
   "comp_manual_review_content": {
-    "description": "??????comp_manual_review",
+    "description": "机器人回复文案：New API 返回结果不明确，已冻结本次资格和预算且不会自动重试。请管…",
     "type": "string",
     "default": "New API 返回结果不明确，已冻结本次资格和预算且不会自动重试。请管理员核查流水号：{serial}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{serial}。"
   },
   "comp_closed_content": {
-    "description": "??????comp_closed",
+    "description": "机器人回复文案：补偿 #{activity_id}“{title}”已关闭。原因：{re…",
     "type": "string",
     "default": "补偿 #{activity_id}“{title}”已关闭。原因：{reason}",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{activity_id}、{reason}、{title}。"
   },
   "comp_auto_closed_content": {
-    "description": "??????comp_auto_closed",
+    "description": "机器人回复文案：补偿“{title}”已到结束时间，本场活动现已关闭。",
     "type": "string",
     "default": "补偿“{title}”已到结束时间，本场活动现已关闭。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{title}。"
+  },
+  "comp_budget_closed_content": {
+    "description": "机器人回复文案：补偿“{title}”的总预算已耗尽，本场活动现已关闭。",
+    "type": "string",
+    "default": "补偿“{title}”的总预算已耗尽，本场活动现已关闭。",
+    "hint": "可用占位符：{title}。"
   },
   "comp_review_not_found_content": {
-    "description": "??????comp_review_not_found",
+    "description": "机器人回复文案：没有找到需要核查的补偿流水号。",
     "type": "string",
     "default": "没有找到需要核查的补偿流水号。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "comp_review_success_content": {
-    "description": "??????comp_review_success",
+    "description": "机器人回复文案：补偿流水 {serial} 已核查为成功并完成记账。",
     "type": "string",
     "default": "补偿流水 {serial} 已核查为成功并完成记账。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{serial}。"
   },
   "comp_review_failed_content": {
-    "description": "??????comp_review_failed",
+    "description": "机器人回复文案：补偿流水 {serial} 已核查为失败并释放资格。",
     "type": "string",
     "default": "补偿流水 {serial} 已核查为失败并释放资格。",
-    "hint": "?????????????????"
+    "hint": "可用占位符：{serial}。"
   },
   "comp_budget_reserved_content": {
-    "description": "??????comp_budget_reserved",
+    "description": "机器人回复文案：剩余预算正被其他发放或人工核查冻结，请稍后再次确认。",
     "type": "string",
     "default": "剩余预算正被其他发放或人工核查冻结，请稍后再次确认。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
   "lottery_keyword_reserved_content": {
-    "description": "??????lottery_keyword_reserved",
+    "description": "机器人回复文案：该口令与新人礼、抽奖领奖或补偿指令冲突，请更换。",
     "type": "string",
     "default": "该口令与新人礼、抽奖领奖或补偿指令冲突，请更换。",
-    "hint": "?????????????????"
+    "hint": "可自定义机器人在对应场景发送的完整文字。"
   }
 }
