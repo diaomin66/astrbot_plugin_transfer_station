@@ -5,6 +5,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request
 
+from .page_validation import positive_int
 from .storage import MAX_IMPORT_CODES, GiftStorage
 
 PLUGIN_NAME = "astrbot_plugin_transfer_station"
@@ -59,10 +60,10 @@ class GiftPageApi:
 
     @staticmethod
     def _pagination() -> tuple[int, int]:
-        page = request.query.get("page", 1, type=int)
-        page_size = request.query.get("page_size", 20, type=int)
-        if page < 1 or page_size < 1 or page_size > 100:
-            raise ValueError("page 必须大于 0，page_size 必须在 1 到 100 之间")
+        page = positive_int(request.query.get("page", "1"), "page")
+        page_size = positive_int(request.query.get("page_size", "20"), "page_size")
+        if page_size > 100:
+            raise ValueError("page_size 必须在 1 到 100 之间")
         return page, page_size
 
     @staticmethod
@@ -124,7 +125,7 @@ class GiftPageApi:
 
     async def delete_code(self, code_id: str):
         try:
-            parsed_id = int(code_id)
+            parsed_id = positive_int(code_id, "兑换码 ID")
         except (TypeError, ValueError):
             return error_response("兑换码 ID 无效")
         return await self._delete_code(parsed_id)
@@ -132,7 +133,7 @@ class GiftPageApi:
     async def delete_code_bridge(self):
         try:
             payload = await self._payload()
-            code_id = int(payload.get("id", 0))
+            code_id = positive_int(payload.get("id"), "兑换码 ID")
         except (TypeError, ValueError):
             return error_response("兑换码 ID 无效")
         return await self._delete_code(code_id)
@@ -187,10 +188,10 @@ class GiftPageApi:
     async def resolve_gift_review(self):
         try:
             payload = await self._payload()
-            reservation_id = int(payload.get("id", 0))
+            reservation_id = positive_int(payload.get("id"), "核查记录 ID")
             delivered = payload.get("delivered")
-            if reservation_id <= 0 or not isinstance(delivered, bool):
-                raise ValueError("核查记录 ID 或结果无效")
+            if not isinstance(delivered, bool):
+                raise TypeError("核查记录 ID 或结果无效")
             resolved = await self.storage.review_gift_delivery(
                 reservation_id,
                 delivered=delivered,

@@ -321,3 +321,68 @@
 - `tests/test_static_contract.py`??? v1.3.0 ????AstrBot ??????????????
 - `tests/test_storage.py`????????????????????????
 - ????????????? `bc24175266d00b63833cb02515bf45002b11ef9f`??????? `git revert <??????>` ?????????
+
+## 2026-07-30 - Task: 完成 v1.4.0 抽奖、补偿双 Page 与三轮审查加固并准备发布
+
+### What was done
+
+- 在新人礼系统之外完成独立的抽奖与补偿系统，并新增“抽奖与补偿调度台”Plugin Page；插件版本统一为 `v1.4.0`，两个活动数据库与 `gifts.db` 保持隔离。
+- 调度台支持非敏感 New API 设置、连接测试、抽奖草稿与奖项管理、发布/开奖/取消、补偿开启/关闭、当前活动、分页历史、发放明细和人工核查；New API 凭据不通过 Page 读取、提交或回显。
+- 完成三轮安全、代码质量、Bug、竞态、测试稳定性和可维护性审查后的加固：SQLite 取消安全关闭、严格整数解析、配置热重载写入所有权、停止期设置保存屏障、New API 密码会话 401 单次重登、通知有序发出及过期租约恢复、后台恢复循环单次异常自愈、Page 请求代次隔离和表单提交锁定。
+- 修正永久新人防刷边界：任何已进入 `known_users` 的 QQ ID 永久保持已知状态，不再允许因基线与入群事件时序而提升为新人；退群重进不能获得资格。
+- 将开发测试基线升级到 `pytest>=9.0.3,<10`，重新生成 Windows/Python 3.12 哈希锁文件，并保留固定 SHA 的 GitHub Actions 依赖。
+- 所有中文元数据、配置说明、Page 标题、文档和界面文案均以 UTF-8 保存；新人礼 Page 的兑换码表格、删除操作、数据库人数和当日新人统计保持可用。
+
+### Testing
+
+- `python -m pytest -q`：`120 passed`；仅 AstrBot 依赖在 Python 3.12 下产生已知的 `audioop` 弃用警告。
+- `npm test`：`11 passed`，覆盖两个 Plugin Page 的表格对齐/删除、设置冲突、提交锁定、活动切换、旧请求隔离、历史分页回滚和大整数精度。
+- `ruff check`：通过；`ruff format --check`：`19 files already formatted`。
+- `python -m py_compile` 覆盖全部插件 Python 模块：通过。
+- `node --check pages/gift_codes/app.js` 与 `node --check pages/campaigns/app.js`：通过。
+- UTF-8 读取、`_conf_schema.json`/i18n/package JSON 和 `metadata.yaml` 解析：通过；`git diff --check`：通过。
+- AstrBot `4.26.7` 非侵入式初始化、`27` 条 Page 路由注册和终止释放：通过。
+- `npm audit --audit-level=high`：`0 vulnerabilities`；`pip-audit -r requirements-dev.txt`：`No known vulnerabilities found`。
+- 未连接真实 NapCat 测试群和测试 New API 实例执行最终加额验收；首次真实验收仍必须使用测试群、测试 QQ 和测试 New API 用户，禁止直接使用生产用户。
+
+### Notes
+
+- `.astrbot-plugin/i18n/en-US.json`：登记第二个 Plugin Page 的英文标题。
+- `.astrbot-plugin/i18n/zh-CN.json`：登记第二个 Plugin Page 的中文标题。
+- `.github/workflows/tests.yml`：固定 Windows、Python、Node 和 GitHub Actions 版本并执行 Python/JS 全套检查。
+- `.gitignore`：忽略本地 Node 依赖目录。
+- `README.md`：更新 v1.4.0 双系统、双 Page、安装、配置、安全边界和验证说明。
+- `_conf_schema.json`：恢复中文并补充活动 Page 设置分组与全部可配置活动文案。
+- `campaign_messages.py`：补充活动 Page 与并发保护所需可配置回复。
+- `campaign_page_api.py`：新增抽奖与补偿调度台后端接口、配置 revision/热重载保护及生命周期屏障。
+- `compensation.py`：完善补偿持久化、Page 查询、预算关闭、通知顺序、查找限流和并发恢复。
+- `docs/CAMPAIGNS.md`：更新 New API、抽奖、补偿、调度台、并发、核查、备份与故障处理文档。
+- `docs/USAGE.md`：更新双 Page 操作、新人永久防刷、部署、备份和排障说明。
+- `lottery.py`：完善抽奖持久化、Page 查询、奖项 revision、通知顺序、领奖恢复和并发保护。
+- `main.py`：接入活动 Page、生命周期管理、永久新人判定、后台恢复自愈和活动通知协调。
+- `metadata.yaml`：升级为 v1.4.0，要求 AstrBot `>=4.26,<5` 并注册两个 Plugin Page。
+- `newapi_client.py`：加强 URL/TLS、总超时、密码会话重登、响应判定、额度边界和日志脱敏。
+- `package.json`：统一两个 Page 的 JavaScript 测试入口。
+- `page_api.py`：加强新人礼 Page 参数校验与人工送达核查。
+- `page_validation.py`：新增 SQLite 安全范围内的严格正整数解析。
+- `pages/gift_codes/index.html`：修正新人礼 Page 资源版本并保持兑换码行布局一致。
+- `pages/campaigns/index.html`：新增抽奖与补偿调度台页面结构及 300 字操作原因限制。
+- `pages/campaigns/app.js`：新增调度台交互、可视化、请求代次隔离、表单提交锁定和安全文本渲染。
+- `pages/campaigns/style.css`：新增调度台响应式视觉样式。
+- `pytest.ini`：设置异步测试、30 秒超时并将资源/协程泄漏警告提升为错误。
+- `requirements-dev.txt`：固定 AstrBot 4.26.7 并将 pytest 下限升级为 9.0.3。
+- `requirements-dev.lock`：重新生成 Windows/Python 3.12 哈希锁文件，解析 pytest 9.1.1。
+- `sqlite_utils.py`：新增取消安全的 aiosqlite 连接关闭上下文。
+- `storage.py`：加强新人礼数据库初始化、永久用户规则、发放保留/核查和 Page 统计。
+- `tests/js/page_behavior.test.mjs`：覆盖新人礼表格对齐、显示、复制和两次确认删除。
+- `tests/js/campaign_page_behavior.test.mjs`：覆盖调度台配置、活动、历史、并发 UI 和大整数行为。
+- `tests/test_campaign_page_api.py`：覆盖调度台路由、设置生命周期、CRUD、分页、权限边界和非法参数。
+- `tests/test_campaign_storage.py`：覆盖抽奖/补偿状态机、通知、预算、并发、恢复和 Page 数据。
+- `tests/test_newapi_client.py`：覆盖认证、2FA、权限、TLS、换算、原子加额、401 重登和失败分类。
+- `tests/test_page_api.py`：覆盖新人礼 Page 严格参数、删除和人工核查。
+- `tests/test_plugin.py`：覆盖新人礼、抽奖、补偿、调度、生命周期、恢复循环和 AstrBot 事件路由。
+- `tests/test_static_contract.py`：覆盖 v1.4.0 元数据、双 Page、配置和 ADMIN 命令契约。
+- `tests/test_storage.py`：覆盖永久用户、新人资格、库存、领取、恢复和跨实例并发。
+- `progress.md`：仅在文件末尾追加本轮最终实施与验证记录。
+- 本轮未修改、删除或暂存工作区现有 Adobe2API、压缩包、Compose、HAProxy 和取证目录。
+- 回滚方式：先停止 AstrBot，备份 `gifts.db`、`lottery.db`、`compensation.db` 及对应 `-wal`/`-shm` 文件；发布后执行 `git revert <本轮提交哈希>`，再重启 AstrBot。

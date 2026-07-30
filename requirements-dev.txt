@@ -1,6 +1,6 @@
 -r requirements.txt
 astrbot==4.26.7
-pytest>=8.4,<9
+pytest>=9.0.3,<10
 pytest-asyncio>=1.0,<2
 pytest-timeout>=2.4,<3
 PyYAML>=6,<7

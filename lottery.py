@@ -33,11 +33,62 @@ from .campaign_utils import (
     validate_text,
 )
 from .newapi_client import NewApiClient, NewApiError, NewApiUser, QuotaSnapshot
+from .sqlite_utils import open_sqlite
 
 LOTTERY_SCHEMA_VERSION = 4
 MAX_LOOKUP_ATTEMPTS_PER_USER = 5
+LOOKUP_ATTEMPT_WINDOW_SECONDS = 10 * 60
 NOTIFICATION_LEASE_SECONDS = 60
 ACTIVE_ACTIVITY_STATES = ("draft", "scheduled", "open", "claiming")
+LOTTERY_PAGE_ACTIVITY_FIELDS = (
+    "id",
+    "group_id",
+    "title",
+    "description",
+    "status",
+    "start_at",
+    "draw_at",
+    "keyword",
+    "claim_duration_seconds",
+    "claim_deadline_at",
+    "display_type",
+    "created_by",
+    "created_at",
+    "published_at",
+    "drawn_at",
+    "closed_at",
+    "close_reason",
+    "participant_count",
+    "winner_count",
+    "paid_winner_count",
+    "manual_review_count",
+    "revision",
+)
+LOTTERY_PAGE_PRIZE_FIELDS = (
+    "id",
+    "position",
+    "name",
+    "winner_count",
+    "display_amount",
+    "raw_quota",
+)
+LOTTERY_PAGE_WINNER_FIELDS = (
+    "id",
+    "user_id",
+    "payout_state",
+    "claim_deadline_at",
+    "created_at",
+    "prize_name",
+    "position",
+    "display_amount",
+    "raw_quota",
+    "serial",
+    "api_user_id",
+    "api_username",
+    "payout_status",
+    "error_type",
+    "payout_updated_at",
+)
 _SHARED_INIT_LOCKS: WeakKeyDictionary[
     asyncio.AbstractEventLoop,
     dict[str, asyncio.Lock],
@@ -64,7 +115,7 @@ class LotteryStorage:
         async with _shared_init_lock(self.db_path):
             if self._initialized:
                 return
-            async with aiosqlite.connect(self.db_path) as db:
+            async with open_sqlite(self.db_path) as db:
                 await db.execute("PRAGMA busy_timeout=5000")
                 await db.execute("PRAGMA journal_mode=WAL")
                 await db.execute("PRAGMA foreign_keys=ON")
@@ -220,14 +271,51 @@ class LotteryStorage:
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[aiosqlite.Connection]:
         await self.initialize()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with open_sqlite(self.db_path) as db:
             db.row_factory = sqlite3.Row
+            await db.execute("PRAGMA busy_timeout=5000")
             await db.execute("PRAGMA foreign_keys=ON")
             yield db
 
     @staticmethod
     def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
+
+    @staticmethod
+    def _page_activity(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        values = dict(row)
+        result = {
+            key: values.get(key)
+            for key in LOTTERY_PAGE_ACTIVITY_FIELDS
+            if key in values
+        }
+        for key in ("id", "revision"):
+            if result.get(key) is not None:
+                result[key] = str(result[key])
+        return result
+
+    @staticmethod
+    def _page_prize(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        values = dict(row)
+        result = {
+            key: values.get(key) for key in LOTTERY_PAGE_PRIZE_FIELDS if key in values
+        }
+        if result.get("id") is not None:
+            result["id"] = str(result["id"])
+        if result.get("raw_quota") is not None:
+            result["raw_quota"] = str(result["raw_quota"])
+        return result
+
+    @staticmethod
+    def _page_winner(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        values = dict(row)
+        result = {
+            key: values.get(key) for key in LOTTERY_PAGE_WINNER_FIELDS if key in values
+        }
+        for key in ("id", "api_user_id", "raw_quota"):
+            if result.get(key) is not None:
+                result[key] = str(result[key])
+        return result
 
     @staticmethod
     async def _enqueue_notification(
@@ -279,9 +367,19 @@ class LotteryStorage:
             await db.execute("BEGIN IMMEDIATE")
             await db.execute(
                 """
-                UPDATE lottery_notifications
-                SET status = 'pending', updated_at = ?
-                WHERE status = 'sending' AND updated_at <= ?
+                UPDATE lottery_notifications AS current
+                SET status = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM lottery_notifications AS newer
+                            WHERE newer.activity_id = current.activity_id
+                              AND newer.id > current.id
+                        )
+                        THEN 'superseded'
+                        ELSE 'pending'
+                    END,
+                    updated_at = ?
+                WHERE current.status = 'sending' AND current.updated_at <= ?
                 """,
                 (marker, stale_before),
             )
@@ -337,9 +435,19 @@ class LotteryStorage:
             await db.execute("BEGIN IMMEDIATE")
             await db.execute(
                 """
-                UPDATE lottery_notifications
-                SET status = 'pending', updated_at = ?
-                WHERE status = 'sending' AND updated_at <= ?
+                UPDATE lottery_notifications AS current
+                SET status = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM lottery_notifications AS newer
+                            WHERE newer.activity_id = current.activity_id
+                              AND newer.id > current.id
+                        )
+                        THEN 'superseded'
+                        ELSE 'pending'
+                    END,
+                    updated_at = ?
+                WHERE current.status = 'sending' AND current.updated_at <= ?
                 """,
                 (marker, stale_before),
             )
@@ -385,13 +493,26 @@ class LotteryStorage:
         lease_marker: str,
     ) -> bool:
         async with self._write_lock, self._connection() as db:
+            marker = to_iso(utc_now())
             cursor = await db.execute(
                 """
-                UPDATE lottery_notifications
-                SET status = 'pending', updated_at = ?
-                WHERE id = ? AND status = 'sending' AND updated_at = ?
+                UPDATE lottery_notifications AS current
+                SET status = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM lottery_notifications AS newer
+                            WHERE newer.activity_id = current.activity_id
+                              AND newer.id > current.id
+                        )
+                        THEN 'superseded'
+                        ELSE 'pending'
+                    END,
+                    updated_at = ?
+                WHERE current.id = ?
+                  AND current.status = 'sending'
+                  AND current.updated_at = ?
                 """,
-                (to_iso(utc_now()), int(notification_id), str(lease_marker)),
+                (marker, int(notification_id), str(lease_marker)),
             )
             await db.commit()
             return cursor.rowcount == 1
@@ -638,6 +759,62 @@ class LotteryStorage:
             )
             await db.commit()
             return True
+
+    async def delete_prize_by_id(
+        self,
+        group_id: str,
+        prize_id: int,
+        *,
+        expected_activity_id: int,
+        expected_revision: int,
+    ) -> int | None:
+        async with self._write_lock, self._connection() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            activity = await self._active_activity(db, group_id)
+            if not activity or activity["status"] != "draft":
+                await db.rollback()
+                raise ValueError("no_draft")
+            if int(activity["id"]) != int(expected_activity_id):
+                await db.rollback()
+                raise ValueError("stale_activity")
+            if int(activity["revision"]) != int(expected_revision):
+                await db.rollback()
+                raise ValueError("stale_revision")
+            cursor = await db.execute(
+                """
+                SELECT position
+                FROM lottery_prizes
+                WHERE id = ? AND activity_id = ?
+                """,
+                (int(prize_id), int(activity["id"])),
+            )
+            prize = await cursor.fetchone()
+            if not prize:
+                await db.rollback()
+                return None
+            position = int(prize["position"])
+            await db.execute(
+                "DELETE FROM lottery_prizes WHERE id = ? AND activity_id = ?",
+                (int(prize_id), int(activity["id"])),
+            )
+            await db.execute(
+                """
+                UPDATE lottery_prizes
+                SET position = position - 1
+                WHERE activity_id = ? AND position > ?
+                """,
+                (int(activity["id"]), position),
+            )
+            await db.execute(
+                """
+                UPDATE lottery_activities
+                SET revision = revision + 1
+                WHERE id = ?
+                """,
+                (int(activity["id"]),),
+            )
+            await db.commit()
+            return position
 
     async def prizes(self, activity_id: int) -> list[dict[str, Any]]:
         async with self._connection() as db:
@@ -1026,6 +1203,228 @@ class LotteryStorage:
             )
             return [dict(row) for row in await cursor.fetchall()]
 
+    async def dashboard_summary(self) -> dict[str, int]:
+        placeholders = ",".join("?" for _ in ACTIVE_ACTIVITY_STATES)
+        async with self._connection() as db:
+            cursor = await db.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS activity_count,
+                    SUM(CASE WHEN status IN ({placeholders}) THEN 1 ELSE 0 END)
+                        AS active_count,
+                    SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)
+                        AS open_count
+                FROM lottery_activities
+                """,
+                ACTIVE_ACTIVITY_STATES,
+            )
+            activity_row = await cursor.fetchone()
+            cursor = await db.execute(
+                "SELECT COUNT(*) AS participant_count FROM lottery_participants"
+            )
+            participant_row = await cursor.fetchone()
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS winner_count,
+                    SUM(CASE WHEN payout_state = 'paid' THEN 1 ELSE 0 END)
+                        AS paid_winner_count,
+                    SUM(CASE WHEN payout_state = 'manual_review' THEN 1 ELSE 0 END)
+                        AS manual_review_count
+                FROM lottery_winners
+                """
+            )
+            winner_row = await cursor.fetchone()
+            return {
+                "activity_count": int(activity_row["activity_count"] or 0),
+                "active_count": int(activity_row["active_count"] or 0),
+                "open_count": int(activity_row["open_count"] or 0),
+                "participant_count": int(participant_row["participant_count"] or 0),
+                "winner_count": int(winner_row["winner_count"] or 0),
+                "paid_winner_count": int(winner_row["paid_winner_count"] or 0),
+                "manual_review_count": int(winner_row["manual_review_count"] or 0),
+            }
+
+    async def list_activities(
+        self,
+        page: int,
+        page_size: int,
+        *,
+        scope: str = "all",
+        group_id: str = "",
+    ) -> dict[str, Any]:
+        where: list[str] = []
+        params: list[Any] = []
+        active_placeholders = ",".join("?" for _ in ACTIVE_ACTIVITY_STATES)
+        if scope == "active":
+            where.append(f"la.status IN ({active_placeholders})")
+            params.extend(ACTIVE_ACTIVITY_STATES)
+        elif scope == "history":
+            where.append(f"la.status NOT IN ({active_placeholders})")
+            params.extend(ACTIVE_ACTIVITY_STATES)
+        elif scope != "all":
+            raise ValueError("invalid_scope")
+        if group_id:
+            where.append("la.group_id = ?")
+            params.append(str(group_id))
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        offset = (int(page) - 1) * int(page_size)
+        async with self._connection() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM lottery_activities AS la
+                {where_sql}
+                """,
+                tuple(params),
+            )
+            total_row = await cursor.fetchone()
+            total = int(total_row["total"] or 0)
+            cursor = await db.execute(
+                f"""
+                SELECT la.*,
+                    (
+                        SELECT COUNT(*) FROM lottery_participants AS lp
+                        WHERE lp.activity_id = la.id
+                    ) AS participant_count,
+                    (
+                        SELECT COUNT(*) FROM lottery_winners AS lw
+                        WHERE lw.activity_id = la.id
+                    ) AS winner_count,
+                    (
+                        SELECT COUNT(*) FROM lottery_winners AS lw
+                        WHERE lw.activity_id = la.id
+                          AND lw.payout_state = 'paid'
+                    ) AS paid_winner_count,
+                    (
+                        SELECT COUNT(*) FROM lottery_winners AS lw
+                        WHERE lw.activity_id = la.id
+                          AND lw.payout_state = 'manual_review'
+                    ) AS manual_review_count
+                FROM lottery_activities AS la
+                {where_sql}
+                ORDER BY la.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, int(page_size), offset),
+            )
+            items = [self._page_activity(row) for row in await cursor.fetchall()]
+            await db.commit()
+        return {
+            "items": items,
+            "total": total,
+            "page": int(page),
+            "page_size": int(page_size),
+            "has_more": offset + len(items) < total,
+        }
+
+    async def dashboard_activity(
+        self,
+        activity_id: int,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any] | None:
+        offset = (int(page) - 1) * int(page_size)
+        async with self._connection() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT * FROM lottery_activities WHERE id = ?",
+                (int(activity_id),),
+            )
+            activity = await cursor.fetchone()
+            if not activity:
+                await db.rollback()
+                return None
+            cursor = await db.execute(
+                """
+                SELECT id, position, name, winner_count, display_amount, raw_quota
+                FROM lottery_prizes
+                WHERE activity_id = ?
+                ORDER BY position ASC
+                """,
+                (int(activity_id),),
+            )
+            prizes = [self._page_prize(row) for row in await cursor.fetchall()]
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS participant_count,
+                    SUM(CASE WHEN eligible_at_draw = 1 THEN 1 ELSE 0 END)
+                        AS eligible_count
+                FROM lottery_participants
+                WHERE activity_id = ?
+                """,
+                (int(activity_id),),
+            )
+            participant_row = await cursor.fetchone()
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN payout_state = 'paid' THEN 1 ELSE 0 END)
+                        AS paid_winner_count,
+                    SUM(CASE WHEN payout_state = 'manual_review' THEN 1 ELSE 0 END)
+                        AS manual_review_count
+                FROM lottery_winners
+                WHERE activity_id = ?
+                """,
+                (int(activity_id),),
+            )
+            winner_summary_row = await cursor.fetchone()
+            winner_total = int(winner_summary_row["total"] or 0)
+            paid_winner_count = int(winner_summary_row["paid_winner_count"] or 0)
+            manual_review_count = int(winner_summary_row["manual_review_count"] or 0)
+            cursor = await db.execute(
+                """
+                SELECT
+                    lw.id, lw.user_id, lw.payout_state,
+                    lw.claim_deadline_at, lw.created_at,
+                    lp.name AS prize_name, lp.position,
+                    lp.display_amount, lp.raw_quota,
+                    payout.serial, payout.api_user_id, payout.api_username,
+                    payout.status AS payout_status,
+                    payout.error_type,
+                    payout.updated_at AS payout_updated_at
+                FROM lottery_winners AS lw
+                JOIN lottery_prizes AS lp ON lp.id = lw.prize_id
+                LEFT JOIN lottery_payouts AS payout
+                  ON payout.id = (
+                    SELECT latest.id
+                    FROM lottery_payouts AS latest
+                    WHERE latest.winner_id = lw.id
+                    ORDER BY latest.id DESC
+                    LIMIT 1
+                  )
+                WHERE lw.activity_id = ?
+                ORDER BY lp.position ASC, lw.id ASC
+                LIMIT ? OFFSET ?
+                """,
+                (int(activity_id), int(page_size), offset),
+            )
+            winners = [self._page_winner(row) for row in await cursor.fetchall()]
+            await db.commit()
+        activity_values = dict(activity)
+        activity_values.update(
+            {
+                "participant_count": int(participant_row["participant_count"] or 0),
+                "winner_count": winner_total,
+                "paid_winner_count": paid_winner_count,
+                "manual_review_count": manual_review_count,
+            }
+        )
+        return {
+            "activity": self._page_activity(activity_values),
+            "prizes": prizes,
+            "participant_count": int(participant_row["participant_count"] or 0),
+            "eligible_count": int(participant_row["eligible_count"] or 0),
+            "winners": winners,
+            "winner_total": winner_total,
+            "winner_page": int(page),
+            "winner_page_size": int(page_size),
+            "winner_has_more": offset + len(winners) < winner_total,
+        }
+
     async def participant_page(
         self,
         group_id: str,
@@ -1232,17 +1631,24 @@ class LotteryStorage:
                 """,
                 (int(activity["id"]), str(qq_id), to_iso(now)),
             )
+            cutoff = to_iso(now - timedelta(seconds=LOOKUP_ATTEMPT_WINDOW_SECONDS))
             cursor = await db.execute(
                 """
                 UPDATE lottery_lookup_attempts
-                SET attempt_count = attempt_count + 1, updated_at = ?
+                SET attempt_count = CASE
+                        WHEN updated_at <= ? THEN 1
+                        ELSE attempt_count + 1
+                    END,
+                    updated_at = ?
                 WHERE activity_id = ? AND qq_id = ?
-                  AND attempt_count < ?
+                  AND (updated_at <= ? OR attempt_count < ?)
                 """,
                 (
+                    cutoff,
                     to_iso(now),
                     int(activity["id"]),
                     str(qq_id),
+                    cutoff,
                     MAX_LOOKUP_ATTEMPTS_PER_USER,
                 ),
             )
@@ -1332,13 +1738,14 @@ class LotteryStorage:
     ) -> bool:
         if status not in {"paid", "failed", "manual_review"}:
             raise ValueError("invalid_status")
-        winner_state = status if status != "failed" else None
         async with self._write_lock, self._connection() as db:
             await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
                 """
-                SELECT id, winner_id FROM lottery_payouts
-                WHERE serial = ? AND status = 'processing'
+                SELECT lp.id, lp.winner_id, lw.claim_deadline_at
+                FROM lottery_payouts AS lp
+                JOIN lottery_winners AS lw ON lw.id = lp.winner_id
+                WHERE lp.serial = ? AND lp.status = 'processing'
                 """,
                 (serial,),
             )
@@ -1353,6 +1760,13 @@ class LotteryStorage:
                 WHERE id = ?
                 """,
                 (status, error_type, to_iso(now), int(payout["id"])),
+            )
+            winner_state = (
+                status
+                if status != "failed"
+                else "expired"
+                if now >= from_iso(payout["claim_deadline_at"])
+                else None
             )
             await db.execute(
                 "UPDATE lottery_winners SET payout_state = ? WHERE id = ?",
@@ -1408,6 +1822,7 @@ class LotteryStorage:
         *,
         now: datetime,
         expected_activity_id: int | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any] | None:
         async with self._write_lock, self._connection() as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -1420,6 +1835,11 @@ class LotteryStorage:
             ):
                 await db.rollback()
                 raise ValueError("stale_activity")
+            if expected_revision is not None and int(activity["revision"]) != int(
+                expected_revision
+            ):
+                await db.rollback()
+                raise ValueError("stale_revision")
             await db.execute(
                 """
                 UPDATE lottery_activities
@@ -1790,6 +2210,32 @@ class LotteryService:
         return ActionResult(
             "lottery_prize_deleted" if deleted else "lottery_prize_not_found",
             {"position": str(position)},
+        )
+
+    async def delete_prize_by_id(
+        self,
+        group_id: str,
+        prize_id: int,
+        *,
+        expected_activity_id: int,
+        expected_revision: int,
+    ) -> ActionResult:
+        try:
+            position = await self.storage.delete_prize_by_id(
+                group_id,
+                prize_id,
+                expected_activity_id=expected_activity_id,
+                expected_revision=expected_revision,
+            )
+        except ValueError as exc:
+            if str(exc) in {"stale_activity", "stale_revision"}:
+                return ActionResult("campaign_invalid_argument")
+            return ActionResult("lottery_no_draft")
+        return ActionResult(
+            "lottery_prize_deleted"
+            if position is not None
+            else "lottery_prize_not_found",
+            {"position": str(position if position is not None else prize_id)},
         )
 
     async def publish(
@@ -2174,6 +2620,7 @@ class LotteryService:
         reason: str,
         *,
         expected_activity_id: int | None = None,
+        expected_revision: int | None = None,
     ) -> ActionResult:
         try:
             reason = validate_text(
@@ -2184,12 +2631,18 @@ class LotteryService:
             )
         except ValueError:
             return ActionResult("lottery_invalid_argument")
-        activity = await self.storage.cancel_activity(
-            group_id,
-            reason,
-            now=utc_now(),
-            expected_activity_id=expected_activity_id,
-        )
+        try:
+            activity = await self.storage.cancel_activity(
+                group_id,
+                reason,
+                now=utc_now(),
+                expected_activity_id=expected_activity_id,
+                expected_revision=expected_revision,
+            )
+        except ValueError as exc:
+            if str(exc) in {"stale_activity", "stale_revision"}:
+                return ActionResult("campaign_invalid_argument")
+            raise
         if not activity:
             return ActionResult("lottery_no_active")
         return ActionResult(

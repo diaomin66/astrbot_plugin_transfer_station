@@ -149,7 +149,10 @@ class NewApiClient:
             follow_redirects=False,
         )
         self._configured_token = str(self.config.get("newapi_access_token", "")).strip()
+        self._username = str(self.config.get("newapi_username", "")).strip()
+        self._password = str(self.config.get("newapi_password", ""))
         self._session_token = ""
+        self._login_lock = asyncio.Lock()
 
     @staticmethod
     def config_fingerprint(config: dict[str, Any]) -> tuple[Any, ...]:
@@ -169,6 +172,10 @@ class NewApiClient:
         except (TypeError, ValueError):
             value = 10
         return min(120.0, max(1.0, value))
+
+    @property
+    def request_timeout_seconds(self) -> float:
+        return self._timeout_seconds
 
     def _validated_base_url(self) -> str:
         raw = str(self.config.get("newapi_base_url", "")).strip().rstrip("/")
@@ -198,28 +205,29 @@ class NewApiClient:
             await self._client.aclose()
 
     async def _login(self) -> None:
-        username = str(self.config.get("newapi_username", "")).strip()
-        password = str(self.config.get("newapi_password", ""))
-        if not username or not password:
-            raise NewApiError(
-                "请配置 New API 访问令牌，或同时配置用户名和密码",
-                kind="config",
+        async with self._login_lock:
+            if self._session_token:
+                return
+            if not self._username or not self._password:
+                raise NewApiError(
+                    "请配置 New API 访问令牌，或同时配置用户名和密码",
+                    kind="config",
+                )
+            payload = await self._request_json(
+                "POST",
+                "/api/user/login",
+                json={"username": self._username, "password": self._password},
+                authenticated=False,
+                write=False,
             )
-        payload = await self._request_json(
-            "POST",
-            "/api/user/login",
-            json={"username": username, "password": password},
-            authenticated=False,
-            write=False,
-        )
-        data = payload.get("data")
-        if isinstance(data, dict) and data.get("require_2fa"):
-            raise NewApiError(
-                "New API 账号已启用 2FA，请改用管理员访问令牌",
-                kind="2fa",
-            )
-        if isinstance(data, dict):
-            self._session_token = str(data.get("access_token", "")).strip()
+            data = payload.get("data")
+            if isinstance(data, dict) and data.get("require_2fa"):
+                raise NewApiError(
+                    "New API 账号已启用 2FA，请改用管理员访问令牌",
+                    kind="2fa",
+                )
+            if isinstance(data, dict):
+                self._session_token = str(data.get("access_token", "")).strip()
 
     async def _authorization_headers(self) -> dict[str, str]:
         token = self._configured_token or self._session_token
@@ -250,52 +258,73 @@ class NewApiClient:
     ) -> dict[str, Any]:
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                headers = (
-                    await self._authorization_headers()
-                    if authenticated
-                    else {"Accept": "application/json"}
-                )
-                response = await self._client.request(
-                    method,
-                    path,
-                    json=json,
-                    headers=headers,
-                )
+                refresh_attempted = False
+                while True:
+                    headers = (
+                        await self._authorization_headers()
+                        if authenticated
+                        else {"Accept": "application/json"}
+                    )
+                    response = await self._client.request(
+                        method,
+                        path,
+                        json=json,
+                        headers=headers,
+                    )
+                    authorization = headers.get("Authorization", "")
+                    used_token = (
+                        authorization.removeprefix("Bearer ").strip()
+                        if authorization.startswith("Bearer ")
+                        else ""
+                    )
+
+                    if (
+                        authenticated
+                        and response.status_code == 401
+                        and not self._configured_token
+                        and not refresh_attempted
+                    ):
+                        if not used_token or self._session_token == used_token:
+                            self._session_token = ""
+                        refresh_attempted = True
+                        continue
+
+                    try:
+                        payload = response.json()
+                    except ValueError as exc:
+                        kind = (
+                            "clear"
+                            if write and 400 <= response.status_code < 500
+                            else "ambiguous"
+                            if write
+                            else "clear"
+                        )
+                        raise NewApiError(
+                            "New API 返回了无法解析的响应",
+                            kind=kind,
+                            status_code=response.status_code,
+                        ) from exc
+                    if not isinstance(payload, dict):
+                        kind = (
+                            "clear"
+                            if write and 400 <= response.status_code < 500
+                            else "ambiguous"
+                            if write
+                            else "clear"
+                        )
+                        raise NewApiError(
+                            "New API 返回结构无效",
+                            kind=kind,
+                            status_code=response.status_code,
+                        )
+
+                    break
         except (TimeoutError, httpx.TimeoutException, httpx.NetworkError) as exc:
             kind = "ambiguous" if write else "clear"
             raise NewApiError("New API 网络请求失败", kind=kind) from exc
         except httpx.HTTPError as exc:
             kind = "ambiguous" if write else "clear"
             raise NewApiError("New API HTTP 请求失败", kind=kind) from exc
-
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            kind = (
-                "clear"
-                if write and 400 <= response.status_code < 500
-                else "ambiguous"
-                if write
-                else "clear"
-            )
-            raise NewApiError(
-                "New API 返回了无法解析的响应",
-                kind=kind,
-                status_code=response.status_code,
-            ) from exc
-        if not isinstance(payload, dict):
-            kind = (
-                "clear"
-                if write and 400 <= response.status_code < 500
-                else "ambiguous"
-                if write
-                else "clear"
-            )
-            raise NewApiError(
-                "New API 返回结构无效",
-                kind=kind,
-                status_code=response.status_code,
-            )
 
         if response.status_code >= 500:
             raise NewApiError(

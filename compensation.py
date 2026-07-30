@@ -26,11 +26,48 @@ from .campaign_utils import (
     validate_text,
 )
 from .newapi_client import NewApiClient, NewApiError, NewApiUser, QuotaSnapshot
+from .sqlite_utils import open_sqlite
 
 COMPENSATION_SCHEMA_VERSION = 3
 MAX_LOOKUP_ATTEMPTS_PER_USER = 5
+LOOKUP_ATTEMPT_WINDOW_SECONDS = 10 * 60
 NOTIFICATION_LEASE_SECONDS = 60
 ACTIVE_STATES = ("open",)
+COMPENSATION_PAGE_ACTIVITY_FIELDS = (
+    "id",
+    "group_id",
+    "title",
+    "status",
+    "per_display_amount",
+    "per_raw_quota",
+    "total_display_amount",
+    "total_raw_quota",
+    "display_type",
+    "start_at",
+    "end_at",
+    "created_by",
+    "created_at",
+    "closed_at",
+    "close_reason",
+    "claim_count",
+    "paid_count",
+    "manual_review_count",
+    "used_raw_quota",
+)
+COMPENSATION_PAGE_RECORD_FIELDS = (
+    "id",
+    "serial",
+    "qq_id",
+    "api_user_id",
+    "api_username",
+    "raw_quota",
+    "display_amount",
+    "status",
+    "confirmation_expires_at",
+    "created_at",
+    "updated_at",
+    "error_type",
+)
 _SHARED_INIT_LOCKS: WeakKeyDictionary[
     asyncio.AbstractEventLoop,
     dict[str, asyncio.Lock],
@@ -57,7 +94,7 @@ class CompensationStorage:
         async with _shared_init_lock(self.db_path):
             if self._initialized:
                 return
-            async with aiosqlite.connect(self.db_path) as db:
+            async with open_sqlite(self.db_path) as db:
                 await db.execute("PRAGMA busy_timeout=5000")
                 await db.execute("PRAGMA journal_mode=WAL")
                 await db.execute("PRAGMA foreign_keys=ON")
@@ -161,14 +198,106 @@ class CompensationStorage:
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[aiosqlite.Connection]:
         await self.initialize()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with open_sqlite(self.db_path) as db:
             db.row_factory = sqlite3.Row
+            await db.execute("PRAGMA busy_timeout=5000")
             await db.execute("PRAGMA foreign_keys=ON")
             yield db
 
     @staticmethod
     def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
+
+    @staticmethod
+    def _page_activity(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        values = dict(row)
+        result = {
+            key: values.get(key)
+            for key in COMPENSATION_PAGE_ACTIVITY_FIELDS
+            if key in values
+        }
+        if result.get("id") is not None:
+            result["id"] = str(result["id"])
+        for key in ("per_raw_quota", "total_raw_quota", "used_raw_quota"):
+            if result.get(key) is not None:
+                result[key] = str(result[key])
+        return result
+
+    @staticmethod
+    def _page_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        values = dict(row)
+        result = {
+            key: values.get(key)
+            for key in COMPENSATION_PAGE_RECORD_FIELDS
+            if key in values
+        }
+        for key in ("id", "api_user_id", "raw_quota"):
+            if result.get(key) is not None:
+                result[key] = str(result[key])
+        return result
+
+    @classmethod
+    async def _close_if_budget_exhausted(
+        cls,
+        db: aiosqlite.Connection,
+        activity_id: int,
+        *,
+        now: datetime,
+    ) -> bool:
+        cursor = await db.execute(
+            """
+            SELECT total_raw_quota, per_raw_quota, group_id, title
+            FROM compensation_activities
+            WHERE id = ? AND status = 'open'
+            """,
+            (int(activity_id),),
+        )
+        activity = await cursor.fetchone()
+        if not activity or activity["total_raw_quota"] is None:
+            return False
+        cursor = await db.execute(
+            """
+            SELECT COALESCE(SUM(raw_quota), 0) AS paid
+            FROM compensation_claims
+            WHERE activity_id = ? AND status = 'paid'
+            """,
+            (int(activity_id),),
+        )
+        paid_row = await cursor.fetchone()
+        paid = int(paid_row["paid"]) if paid_row else 0
+        if int(activity["total_raw_quota"]) - paid >= int(activity["per_raw_quota"]):
+            return False
+        now_iso = to_iso(now)
+        await db.execute(
+            """
+            UPDATE compensation_activities
+            SET status = 'completed', closed_at = ?,
+                close_reason = 'budget_exhausted'
+            WHERE id = ? AND status = 'open'
+            """,
+            (now_iso, int(activity_id)),
+        )
+        await db.execute(
+            """
+            UPDATE compensation_claims
+            SET status = 'cancelled', updated_at = ?
+            WHERE activity_id = ? AND status = 'pending_confirmation'
+            """,
+            (now_iso, int(activity_id)),
+        )
+        await cls._enqueue_notification(
+            db,
+            int(activity_id),
+            str(activity["group_id"]),
+            "comp_budget_closed",
+            {
+                "activity_id": str(activity_id),
+                "title": activity["title"],
+            },
+            now=now,
+            supersede_pending=True,
+        )
+        return True
 
     @staticmethod
     async def _enqueue_notification(
@@ -220,9 +349,19 @@ class CompensationStorage:
             await db.execute("BEGIN IMMEDIATE")
             await db.execute(
                 """
-                UPDATE compensation_notifications
-                SET status = 'pending', updated_at = ?
-                WHERE status = 'sending' AND updated_at <= ?
+                UPDATE compensation_notifications AS current
+                SET status = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM compensation_notifications AS newer
+                            WHERE newer.activity_id = current.activity_id
+                              AND newer.id > current.id
+                        )
+                        THEN 'superseded'
+                        ELSE 'pending'
+                    END,
+                    updated_at = ?
+                WHERE current.status = 'sending' AND current.updated_at <= ?
                 """,
                 (marker, stale_before),
             )
@@ -278,9 +417,19 @@ class CompensationStorage:
             await db.execute("BEGIN IMMEDIATE")
             await db.execute(
                 """
-                UPDATE compensation_notifications
-                SET status = 'pending', updated_at = ?
-                WHERE status = 'sending' AND updated_at <= ?
+                UPDATE compensation_notifications AS current
+                SET status = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM compensation_notifications AS newer
+                            WHERE newer.activity_id = current.activity_id
+                              AND newer.id > current.id
+                        )
+                        THEN 'superseded'
+                        ELSE 'pending'
+                    END,
+                    updated_at = ?
+                WHERE current.status = 'sending' AND current.updated_at <= ?
                 """,
                 (marker, stale_before),
             )
@@ -326,13 +475,26 @@ class CompensationStorage:
         lease_marker: str,
     ) -> bool:
         async with self._write_lock, self._connection() as db:
+            marker = to_iso(utc_now())
             cursor = await db.execute(
                 """
-                UPDATE compensation_notifications
-                SET status = 'pending', updated_at = ?
-                WHERE id = ? AND status = 'sending' AND updated_at = ?
+                UPDATE compensation_notifications AS current
+                SET status = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM compensation_notifications AS newer
+                            WHERE newer.activity_id = current.activity_id
+                              AND newer.id > current.id
+                        )
+                        THEN 'superseded'
+                        ELSE 'pending'
+                    END,
+                    updated_at = ?
+                WHERE current.id = ?
+                  AND current.status = 'sending'
+                  AND current.updated_at = ?
                 """,
-                (to_iso(utc_now()), int(notification_id), str(lease_marker)),
+                (marker, int(notification_id), str(lease_marker)),
             )
             await db.commit()
             return cursor.rowcount == 1
@@ -613,17 +775,24 @@ class CompensationStorage:
                 """,
                 (int(activity["id"]), str(qq_id), to_iso(now)),
             )
+            cutoff = to_iso(now - timedelta(seconds=LOOKUP_ATTEMPT_WINDOW_SECONDS))
             cursor = await db.execute(
                 """
                 UPDATE compensation_lookup_attempts
-                SET attempt_count = attempt_count + 1, updated_at = ?
+                SET attempt_count = CASE
+                        WHEN updated_at <= ? THEN 1
+                        ELSE attempt_count + 1
+                    END,
+                    updated_at = ?
                 WHERE activity_id = ? AND qq_id = ?
-                  AND attempt_count < ?
+                  AND (updated_at <= ? OR attempt_count < ?)
                 """,
                 (
+                    cutoff,
                     to_iso(now),
                     int(activity["id"]),
                     str(qq_id),
+                    cutoff,
                     MAX_LOOKUP_ATTEMPTS_PER_USER,
                 ),
             )
@@ -688,47 +857,11 @@ class CompensationStorage:
                 used_row = await cursor.fetchone()
                 used = int(used_row["used"]) if used_row else 0
                 if int(claim["total_raw_quota"]) - used < int(claim["raw_quota"]):
-                    paid_cursor = await db.execute(
-                        """
-                        SELECT COALESCE(SUM(raw_quota), 0) AS paid
-                        FROM compensation_claims
-                        WHERE activity_id = ? AND status = 'paid'
-                        """,
-                        (int(claim["activity_id"]),),
-                    )
-                    paid_row = await paid_cursor.fetchone()
-                    paid = int(paid_row["paid"]) if paid_row else 0
-                    if int(claim["total_raw_quota"]) - paid < int(claim["raw_quota"]):
-                        await db.execute(
-                            """
-                            UPDATE compensation_activities
-                            SET status = 'completed', closed_at = ?,
-                                close_reason = 'budget_exhausted'
-                            WHERE id = ?
-                            """,
-                            (to_iso(now), int(claim["activity_id"])),
-                        )
-                        await db.execute(
-                            """
-                            UPDATE compensation_claims
-                            SET status = 'cancelled', updated_at = ?
-                            WHERE activity_id = ?
-                              AND status = 'pending_confirmation'
-                            """,
-                            (to_iso(now), int(claim["activity_id"])),
-                        )
-                        await self._enqueue_notification(
-                            db,
-                            int(claim["activity_id"]),
-                            str(group_id),
-                            "comp_budget_closed",
-                            {
-                                "activity_id": str(claim["activity_id"]),
-                                "title": claim["title"],
-                            },
-                            now=now,
-                            supersede_pending=True,
-                        )
+                    if await self._close_if_budget_exhausted(
+                        db,
+                        int(claim["activity_id"]),
+                        now=now,
+                    ):
                         await db.commit()
                         raise ValueError("budget_insufficient")
                     await db.rollback()
@@ -778,60 +911,11 @@ class CompensationStorage:
                 (status, error_type, to_iso(now), serial),
             )
             if status == "paid":
-                cursor = await db.execute(
-                    """
-                    SELECT total_raw_quota, per_raw_quota, group_id, title
-                    FROM compensation_activities
-                    WHERE id = ? AND status = 'open'
-                    """,
-                    (int(claim["activity_id"]),),
+                await self._close_if_budget_exhausted(
+                    db,
+                    int(claim["activity_id"]),
+                    now=now,
                 )
-                activity = await cursor.fetchone()
-                if activity and activity["total_raw_quota"] is not None:
-                    cursor = await db.execute(
-                        """
-                        SELECT COALESCE(SUM(raw_quota), 0) AS used
-                        FROM compensation_claims
-                        WHERE activity_id = ?
-                          AND status IN ('processing', 'paid', 'manual_review')
-                        """,
-                        (int(claim["activity_id"]),),
-                    )
-                    used_row = await cursor.fetchone()
-                    used = int(used_row["used"]) if used_row else 0
-                    if int(activity["total_raw_quota"]) - used < int(
-                        activity["per_raw_quota"]
-                    ):
-                        await db.execute(
-                            """
-                            UPDATE compensation_activities
-                            SET status = 'completed', closed_at = ?,
-                                close_reason = 'budget_exhausted'
-                            WHERE id = ?
-                            """,
-                            (to_iso(now), int(claim["activity_id"])),
-                        )
-                        await self._enqueue_notification(
-                            db,
-                            int(claim["activity_id"]),
-                            str(activity["group_id"]),
-                            "comp_budget_closed",
-                            {
-                                "activity_id": str(claim["activity_id"]),
-                                "title": activity["title"],
-                            },
-                            now=now,
-                            supersede_pending=True,
-                        )
-                        await db.execute(
-                            """
-                            UPDATE compensation_claims
-                            SET status = 'cancelled', updated_at = ?
-                            WHERE activity_id = ?
-                              AND status = 'pending_confirmation'
-                            """,
-                            (to_iso(now), int(claim["activity_id"])),
-                        )
             await db.commit()
             return True
 
@@ -898,60 +982,11 @@ class CompensationStorage:
                 (status, to_iso(now), int(claim["id"])),
             )
             if success:
-                cursor = await db.execute(
-                    """
-                    SELECT total_raw_quota, per_raw_quota, group_id, title
-                    FROM compensation_activities
-                    WHERE id = ? AND status = 'open'
-                    """,
-                    (int(claim["activity_id"]),),
+                await self._close_if_budget_exhausted(
+                    db,
+                    int(claim["activity_id"]),
+                    now=now,
                 )
-                activity = await cursor.fetchone()
-                if activity and activity["total_raw_quota"] is not None:
-                    cursor = await db.execute(
-                        """
-                        SELECT COALESCE(SUM(raw_quota), 0) AS used
-                        FROM compensation_claims
-                        WHERE activity_id = ?
-                          AND status IN ('processing', 'paid', 'manual_review')
-                        """,
-                        (int(claim["activity_id"]),),
-                    )
-                    used_row = await cursor.fetchone()
-                    used = int(used_row["used"]) if used_row else 0
-                    if int(activity["total_raw_quota"]) - used < int(
-                        activity["per_raw_quota"]
-                    ):
-                        await db.execute(
-                            """
-                            UPDATE compensation_activities
-                            SET status = 'completed', closed_at = ?,
-                                close_reason = 'budget_exhausted'
-                            WHERE id = ?
-                            """,
-                            (to_iso(now), int(claim["activity_id"])),
-                        )
-                        await self._enqueue_notification(
-                            db,
-                            int(claim["activity_id"]),
-                            str(activity["group_id"]),
-                            "comp_budget_closed",
-                            {
-                                "activity_id": str(claim["activity_id"]),
-                                "title": activity["title"],
-                            },
-                            now=now,
-                            supersede_pending=True,
-                        )
-                        await db.execute(
-                            """
-                            UPDATE compensation_claims
-                            SET status = 'cancelled', updated_at = ?
-                            WHERE activity_id = ?
-                              AND status = 'pending_confirmation'
-                            """,
-                            (to_iso(now), int(claim["activity_id"])),
-                        )
             await db.commit()
             claim["status"] = status
             return claim
@@ -1031,6 +1066,192 @@ class CompensationStorage:
                 )
             await db.commit()
         return closed
+
+    async def dashboard_summary(self) -> dict[str, Any]:
+        async with self._connection() as db:
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS activity_count,
+                    SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END)
+                        AS active_count
+                FROM compensation_activities
+                """
+            )
+            activity_row = await cursor.fetchone()
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS record_count,
+                    SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END)
+                        AS paid_count,
+                    SUM(CASE WHEN status = 'manual_review' THEN 1 ELSE 0 END)
+                        AS manual_review_count,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN status IN ('processing', 'paid', 'manual_review')
+                            THEN raw_quota
+                            ELSE 0
+                        END
+                    ), 0) AS used_raw_quota
+                FROM compensation_claims
+                """
+            )
+            record_row = await cursor.fetchone()
+            return {
+                "activity_count": int(activity_row["activity_count"] or 0),
+                "active_count": int(activity_row["active_count"] or 0),
+                "record_count": int(record_row["record_count"] or 0),
+                "paid_count": int(record_row["paid_count"] or 0),
+                "manual_review_count": int(record_row["manual_review_count"] or 0),
+                "used_raw_quota": str(int(record_row["used_raw_quota"] or 0)),
+            }
+
+    async def list_activities(
+        self,
+        page: int,
+        page_size: int,
+        *,
+        scope: str = "all",
+        group_id: str = "",
+    ) -> dict[str, Any]:
+        where: list[str] = []
+        params: list[Any] = []
+        if scope == "active":
+            where.append("ca.status = 'open'")
+        elif scope == "history":
+            where.append("ca.status <> 'open'")
+        elif scope != "all":
+            raise ValueError("invalid_scope")
+        if group_id:
+            where.append("ca.group_id = ?")
+            params.append(str(group_id))
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        offset = (int(page) - 1) * int(page_size)
+        async with self._connection() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM compensation_activities AS ca
+                {where_sql}
+                """,
+                tuple(params),
+            )
+            total_row = await cursor.fetchone()
+            total = int(total_row["total"] or 0)
+            cursor = await db.execute(
+                f"""
+                SELECT ca.*,
+                    (
+                        SELECT COUNT(*) FROM compensation_claims AS cc
+                        WHERE cc.activity_id = ca.id
+                    ) AS claim_count,
+                    (
+                        SELECT COUNT(*) FROM compensation_claims AS cc
+                        WHERE cc.activity_id = ca.id AND cc.status = 'paid'
+                    ) AS paid_count,
+                    (
+                        SELECT COUNT(*) FROM compensation_claims AS cc
+                        WHERE cc.activity_id = ca.id
+                          AND cc.status = 'manual_review'
+                    ) AS manual_review_count,
+                    (
+                        SELECT COALESCE(SUM(cc.raw_quota), 0)
+                        FROM compensation_claims AS cc
+                        WHERE cc.activity_id = ca.id
+                          AND cc.status IN (
+                              'processing', 'paid', 'manual_review'
+                          )
+                    ) AS used_raw_quota
+                FROM compensation_activities AS ca
+                {where_sql}
+                ORDER BY ca.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, int(page_size), offset),
+            )
+            items = [self._page_activity(row) for row in await cursor.fetchall()]
+            await db.commit()
+        return {
+            "items": items,
+            "total": total,
+            "page": int(page),
+            "page_size": int(page_size),
+            "has_more": offset + len(items) < total,
+        }
+
+    async def dashboard_activity(
+        self,
+        activity_id: int,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any] | None:
+        offset = (int(page) - 1) * int(page_size)
+        async with self._connection() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT * FROM compensation_activities WHERE id = ?",
+                (int(activity_id),),
+            )
+            activity = await cursor.fetchone()
+            if not activity:
+                await db.rollback()
+                return None
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS claim_count,
+                    SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END)
+                        AS paid_count,
+                    SUM(CASE WHEN status = 'manual_review' THEN 1 ELSE 0 END)
+                        AS manual_review_count,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN status IN ('processing', 'paid', 'manual_review')
+                            THEN raw_quota
+                            ELSE 0
+                        END
+                    ), 0) AS used_raw_quota
+                FROM compensation_claims
+                WHERE activity_id = ?
+                """,
+                (int(activity_id),),
+            )
+            summary_row = await cursor.fetchone()
+            record_total = int(summary_row["claim_count"] or 0)
+            cursor = await db.execute(
+                """
+                SELECT
+                    id, serial, qq_id, api_user_id, api_username,
+                    raw_quota, display_amount, status,
+                    confirmation_expires_at, created_at, updated_at, error_type
+                FROM compensation_claims
+                WHERE activity_id = ?
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (int(activity_id), int(page_size), offset),
+            )
+            records = [self._page_record(row) for row in await cursor.fetchall()]
+            await db.commit()
+        activity_values = dict(activity)
+        activity_values.update(
+            {
+                "claim_count": record_total,
+                "paid_count": int(summary_row["paid_count"] or 0),
+                "manual_review_count": int(summary_row["manual_review_count"] or 0),
+                "used_raw_quota": int(summary_row["used_raw_quota"] or 0),
+            }
+        )
+        return {
+            "activity": self._page_activity(activity_values),
+            "records": records,
+            "record_total": record_total,
+            "record_page": int(page),
+            "record_page_size": int(page_size),
+            "record_has_more": offset + len(records) < record_total,
+        }
 
     async def page(
         self,

@@ -113,6 +113,78 @@ async def test_paid_lottery_state_wins_over_elapsed_claim_deadline(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_lottery_claim_deadline_boundary_is_exact(tmp_path):
+    storage = lottery.LotteryStorage(tmp_path / "lottery.db")
+    now = utils.utc_now()
+    activity = await storage.create_draft("100", "截止边界", "1", now=now)
+    await storage.update_draft("100", claim_duration_seconds=60)
+    await storage.add_prize("100", "一等奖", 1, "10")
+    await storage.publish("100", snap(), now=now)
+    await storage.register("100", "200", "参与抽奖", now=now)
+    await storage.draw(int(activity["id"]), ["200"], now=now)
+    deadline = utils.from_iso(
+        (await storage.winners(int(activity["id"])))[0]["claim_deadline_at"]
+    )
+
+    assert (
+        await storage.submission_state(
+            "100",
+            "200",
+            now=deadline - utils.parse_duration("1s"),
+        )
+        == "eligible"
+    )
+    assert await storage.submission_state("100", "200", now=deadline) == "claim_expired"
+    assert (
+        await storage.submission_state(
+            "100",
+            "200",
+            now=deadline + utils.parse_duration("1s"),
+        )
+        == "claim_expired"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lottery_start_and_draw_boundaries_are_exact(tmp_path):
+    storage = lottery.LotteryStorage(tmp_path / "lottery.db")
+    now = utils.utc_now()
+    start_at = now + utils.parse_duration("10s")
+    draw_at = now + utils.parse_duration("20s")
+    await storage.create_draft("100", "时间边界", "1", now=now)
+    await storage.update_draft(
+        "100",
+        start_at=utils.to_iso(start_at),
+        draw_at=utils.to_iso(draw_at),
+    )
+    await storage.add_prize("100", "一等奖", 1, "10")
+    await storage.publish("100", snap(), now=now)
+
+    assert (
+        await storage.register(
+            "100",
+            "200",
+            "参与抽奖",
+            now=start_at - utils.parse_duration("1s"),
+        )
+        == "not_open"
+    )
+    assert await storage.register("100", "200", "参与抽奖", now=start_at) == "joined"
+    assert (
+        await storage.register(
+            "100",
+            "201",
+            "参与抽奖",
+            now=start_at + utils.parse_duration("1s"),
+        )
+        == "joined"
+    )
+    assert await storage.due_draws(now=draw_at - utils.parse_duration("1s")) == []
+    assert len(await storage.due_draws(now=draw_at)) == 1
+    assert len(await storage.due_draws(now=draw_at + utils.parse_duration("1s"))) == 1
+
+
+@pytest.mark.asyncio
 async def test_compensation_deduplicates_and_budget_is_atomic(tmp_path):
     storage = compensation.CompensationStorage(tmp_path / "compensation.db")
     now = utils.utc_now()
@@ -137,6 +209,29 @@ async def test_compensation_deduplicates_and_budget_is_atomic(tmp_path):
     assert (await storage.get(int(activity["id"])))["status"] == "completed"
     pending = await storage.list_pending_notifications()
     assert [item["event_key"] for item in pending] == ["comp_budget_closed"]
+
+
+@pytest.mark.asyncio
+async def test_compensation_end_boundary_is_exact(tmp_path):
+    storage = compensation.CompensationStorage(tmp_path / "compensation.db")
+    now = utils.utc_now()
+    activity = await storage.open_activity(
+        "100",
+        "时间边界",
+        "1",
+        "10",
+        60,
+        None,
+        snap(),
+        now=now,
+    )
+    end_at = utils.from_iso(activity["end_at"])
+
+    assert await storage.tick(now=end_at - utils.parse_duration("1s")) == []
+    assert (await storage.get(int(activity["id"])))["status"] == "open"
+    assert [item["id"] for item in await storage.tick(now=end_at)] == [activity["id"]]
+    assert (await storage.get(int(activity["id"])))["status"] == "completed"
+    assert await storage.tick(now=end_at + utils.parse_duration("1s")) == []
 
 
 @pytest.mark.asyncio
@@ -208,6 +303,51 @@ async def test_clear_failure_releases_last_budget_for_waiting_claim(tmp_path):
 
     assert second["api_user_id"] == 4
     assert await storage.get_active("100") is not None
+
+
+@pytest.mark.asyncio
+async def test_processing_claims_freeze_budget_but_do_not_close_activity(tmp_path):
+    storage = compensation.CompensationStorage(tmp_path / "compensation.db")
+    now = utils.utc_now()
+    activity = await storage.open_activity(
+        "100",
+        "并行补偿",
+        "1",
+        "10",
+        None,
+        "20",
+        snap(),
+        now=now,
+    )
+    first = await storage.create_pending(
+        "100",
+        "200",
+        newapi.NewApiUser(3, "a", 1),
+        now=now,
+    )
+    second = await storage.create_pending(
+        "100",
+        "201",
+        newapi.NewApiUser(4, "b", 1),
+        now=now,
+    )
+    await storage.reserve("100", "200", now=now)
+    await storage.reserve("100", "201", now=now)
+
+    await storage.finish(first["serial"], "paid", now=now)
+    await storage.finish(second["serial"], "failed", now=now)
+
+    current = await storage.get(int(activity["id"]))
+    assert current["status"] == "open"
+    third = await storage.create_pending(
+        "100",
+        "202",
+        newapi.NewApiUser(5, "c", 1),
+        now=now,
+    )
+    await storage.reserve("100", "202", now=now)
+    await storage.finish(third["serial"], "paid", now=now)
+    assert (await storage.get(int(activity["id"])))["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -393,6 +533,11 @@ async def test_lookup_attempt_limit_persists_for_activity(tmp_path):
     assert not await lottery.LotteryStorage(
         tmp_path / "lottery.db"
     ).consume_lookup_attempt("100", "200", now=now)
+    assert await lottery_storage.consume_lookup_attempt(
+        "100",
+        "200",
+        now=now + utils.parse_duration("10m") + utils.parse_duration("1s"),
+    )
 
 
 @pytest.mark.asyncio
@@ -476,6 +621,76 @@ async def test_notification_claim_is_atomic_across_storage_instances(tmp_path):
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_waits_for_sending_notification_then_supersedes_it(tmp_path):
+    storage = lottery.LotteryStorage(tmp_path / "lottery.db")
+    now = utils.utc_now()
+    activity = await storage.create_draft("100", "过期通知", "1", now=now)
+    await storage.add_prize("100", "一等奖", 1, "10")
+    await storage.publish("100", snap(), now=now)
+    claimed = await storage.claim_notification(
+        int(activity["id"]),
+        "lottery_published",
+    )
+    assert claimed is not None
+
+    await storage.cancel_activity("100", "停止", now=now)
+
+    assert (
+        await storage.claim_notification(
+            int(activity["id"]),
+            "lottery_cancelled",
+        )
+        is None
+    )
+    assert (
+        await storage.release_notification(
+            int(claimed["id"]),
+            str(claimed["lease_marker"]),
+        )
+        is True
+    )
+    pending = await storage.list_pending_notifications()
+    assert [item["event_key"] for item in pending] == ["lottery_cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_stale_sending_notification_is_superseded_by_newer_terminal_event(
+    tmp_path,
+):
+    db_path = tmp_path / "lottery.db"
+    storage = lottery.LotteryStorage(db_path)
+    now = utils.utc_now()
+    activity = await storage.create_draft("100", "过期通知", "1", now=now)
+    await storage.add_prize("100", "一等奖", 1, "10")
+    await storage.publish("100", snap(), now=now)
+    claimed = await storage.claim_notification(
+        int(activity["id"]),
+        "lottery_published",
+    )
+    assert claimed is not None
+    await storage.cancel_activity("100", "停止", now=now)
+
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE lottery_notifications
+            SET updated_at = '2000-01-01T00:00:00+00:00'
+            WHERE id = ?
+            """,
+            (int(claimed["id"]),),
+        )
+
+    pending = await storage.list_pending_notifications()
+    assert [item["event_key"] for item in pending] == ["lottery_cancelled"]
+    with sqlite3.connect(db_path) as db:
+        status = db.execute(
+            "SELECT status FROM lottery_notifications WHERE id = ?",
+            (int(claimed["id"]),),
+        ).fetchone()[0]
+    assert status == "superseded"
 
 
 @pytest.mark.asyncio
@@ -663,3 +878,88 @@ async def test_lottery_legacy_database_initializes_concurrently(tmp_path):
         version = db.execute("PRAGMA user_version").fetchone()[0]
     assert "revision" in columns
     assert version == lottery.LOTTERY_SCHEMA_VERSION
+
+
+@pytest.mark.asyncio
+async def test_lottery_dashboard_counts_cover_all_winner_pages(tmp_path):
+    storage = lottery.LotteryStorage(tmp_path / "lottery.db")
+    now = utils.utc_now()
+    activity = await storage.create_draft("100", "分页统计", "1", now=now)
+    await storage.add_prize("100", "一等奖", 3, "10")
+    await storage.publish("100", snap(), now=now)
+    for user_id in ("200", "201", "202"):
+        await storage.register("100", user_id, "参与抽奖", now=now)
+    await storage.draw(int(activity["id"]), ["200", "201", "202"], now=now)
+
+    first = await storage.create_pending_payout(
+        "100",
+        "200",
+        newapi.NewApiUser(10, "paid-user", 1),
+        now=now,
+    )
+    await storage.reserve_confirmation("100", "200", now=now)
+    await storage.finish_payout(first["serial"], "paid", now=now)
+    second = await storage.create_pending_payout(
+        "100",
+        "201",
+        newapi.NewApiUser(11, "review-user", 1),
+        now=now,
+    )
+    await storage.reserve_confirmation("100", "201", now=now)
+    await storage.finish_payout(second["serial"], "manual_review", now=now)
+
+    detail = await storage.dashboard_activity(int(activity["id"]), 1, 1)
+
+    assert detail["winner_total"] == 3
+    assert len(detail["winners"]) == 1
+    assert detail["activity"]["paid_winner_count"] == 1
+    assert detail["activity"]["manual_review_count"] == 1
+    assert isinstance(detail["activity"]["id"], str)
+    assert isinstance(detail["activity"]["revision"], str)
+
+
+@pytest.mark.asyncio
+async def test_compensation_dashboard_counts_cover_all_record_pages(tmp_path):
+    storage = compensation.CompensationStorage(tmp_path / "compensation.db")
+    now = utils.utc_now()
+    activity = await storage.open_activity(
+        "100",
+        "分页补偿",
+        "1",
+        "10",
+        None,
+        "100",
+        snap(),
+        now=now,
+    )
+    for qq_id, api_user_id, status in (
+        ("200", 10, "paid"),
+        ("201", 11, "manual_review"),
+        ("202", 12, None),
+    ):
+        claim = await storage.create_pending(
+            "100",
+            qq_id,
+            newapi.NewApiUser(api_user_id, f"user-{api_user_id}", 1),
+            now=now,
+        )
+        if status is not None:
+            await storage.reserve("100", qq_id, now=now)
+            await storage.finish(claim["serial"], status, now=now)
+
+    detail = await storage.dashboard_activity(int(activity["id"]), 1, 1)
+    activities = await storage.list_activities(
+        1,
+        20,
+        scope="active",
+        group_id="100",
+    )
+
+    assert detail["record_total"] == 3
+    assert len(detail["records"]) == 1
+    assert detail["activity"]["paid_count"] == 1
+    assert detail["activity"]["manual_review_count"] == 1
+    assert isinstance(detail["activity"]["id"], str)
+    assert isinstance(detail["activity"]["used_raw_quota"], str)
+    assert activities["total"] == 1
+    assert activities["items"][0]["claim_count"] == 3

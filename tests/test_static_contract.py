@@ -17,10 +17,13 @@ def test_metadata_and_config_contract():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
     assert metadata["name"] == "astrbot_plugin_transfer_station"
-    assert metadata["version"] == "v1.3.0"
+    assert metadata["version"] == "v1.4.0"
     assert metadata["support_platforms"] == ["aiocqhttp"]
     assert metadata["astrbot_version"] == ">=4.26,<5"
-    assert [page["name"] for page in metadata["pages"]] == ["gift_codes"]
+    assert [page["name"] for page in metadata["pages"]] == [
+        "gift_codes",
+        "campaigns",
+    ]
     assert {
         "enabled",
         "enabled_group_ids",
@@ -87,6 +90,51 @@ def test_page_uses_bridge_and_safe_dynamic_text_rendering():
     assert "table-layout: fixed" in style
     assert 'id="knownUsers"' in html
     assert 'id="todayNewcomers"' in html
+
+
+def test_campaign_page_uses_bridge_and_preserves_large_ids():
+    html = (ROOT / "pages" / "campaigns" / "index.html").read_text(encoding="utf-8")
+    script = (ROOT / "pages" / "campaigns" / "app.js").read_text(encoding="utf-8")
+
+    assert "/api/plugin/page/bridge-sdk.js" in html
+    assert "window.AstrBotPluginPage" in script
+    assert "bridge.apiGet" in script
+    assert "bridge.apiPost" in script
+    assert ".textContent" in script
+    assert ".innerHTML" not in script
+    assert "Number(activity.id)" not in script
+    assert "Number(item.id)" not in script
+    assert "Number(prize.id)" not in script
+    assert "settingsDirty" in script
+    assert "formBaseRevision" in script
+    assert "detailGeneration" in script
+    assert "settingsReloadButton" in script
+    assert 'id="reasonModal"' in html
+    assert "window.prompt" not in script
+    assert "window.confirm" not in script
+    assert "window.alert" not in script
+    for endpoint in (
+        "campaigns/summary",
+        "campaigns/settings",
+        "campaigns/settings/save",
+        "campaigns/newapi/test",
+        "campaigns/lotteries",
+        "campaigns/lotteries/detail",
+        "campaigns/lotteries/create",
+        "campaigns/lotteries/update",
+        "campaigns/lotteries/prizes/add",
+        "campaigns/lotteries/prizes/delete",
+        "campaigns/lotteries/publish",
+        "campaigns/lotteries/draw",
+        "campaigns/lotteries/cancel",
+        "campaigns/lotteries/review",
+        "campaigns/compensations",
+        "campaigns/compensations/detail",
+        "campaigns/compensations/open",
+        "campaigns/compensations/close",
+        "campaigns/compensations/review",
+    ):
+        assert endpoint in script
 
 
 def test_campaign_command_groups_require_admin_permission():

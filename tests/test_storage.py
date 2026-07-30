@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 from conftest import load_plugin_module
@@ -25,7 +26,12 @@ async def test_import_summary_and_persistence(tmp_path):
     storage = GiftStorage(db_path)
 
     baseline = await storage.record_group_baseline("100", ["101", "102"])
-    assert baseline == {"created": True, "members": 2, "inserted_users": 2}
+    assert baseline == {
+        "created": True,
+        "members": 2,
+        "inserted_users": 2,
+        "inserted_user_ids": ["101", "102"],
+    }
     assert await storage.register_newcomer("100", "200") == "eligible"
     assert await storage.register_newcomer("100", "200") == "known"
     result = await storage.import_codes([" CODE-A ", "", "CODE-A", "CODE-B"])
@@ -46,10 +52,39 @@ async def test_import_summary_and_persistence(tmp_path):
     assert await reloaded.is_group_baselined("100") is True
     assert await reloaded.register_newcomer("100", "101") == "known"
     refreshed = await reloaded.record_group_baseline("100", ["101", "102", "103"])
-    assert refreshed == {"created": False, "members": 3, "inserted_users": 1}
+    assert refreshed == {
+        "created": False,
+        "members": 3,
+        "inserted_users": 1,
+        "inserted_user_ids": ["103"],
+    }
     assert await reloaded.register_newcomer("100", "103") == "known"
     assert await reloaded.is_eligible("100", "200") is True
     assert (await reloaded.list_codes(1, 20))["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_today_newcomers_uses_shanghai_calendar_day(tmp_path):
+    db_path = tmp_path / "gifts.db"
+    storage = GiftStorage(db_path)
+    await register_newcomer(storage, "100", "200")
+    await register_newcomer(storage, "100", "201")
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "UPDATE known_users SET first_seen_at = ? WHERE user_id = ?",
+            ("2026-07-30T15:30:00+00:00", "200"),
+        )
+        db.execute(
+            "UPDATE known_users SET first_seen_at = ? WHERE user_id = ?",
+            ("2026-07-30T16:20:00+00:00", "201"),
+        )
+        db.commit()
+
+    summary = await storage.summary(
+        now=datetime(2026, 7, 30, 16, 40, tzinfo=UTC),
+    )
+
+    assert summary["today_newcomers"] == 1
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,9 @@
   "pages": {
     "gift_codes": {
       "title": "Newcomer Gift Management"
+    },
+    "campaigns": {
+      "title": "Lottery & Compensation Console"
     }
   }
 }

@@ -6,6 +6,7 @@ __pycache__/
 htmlcov/
 .idea/
 .vscode/
+.venv/
 node_modules/
 *.db
 *.db-shm

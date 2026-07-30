@@ -176,6 +176,12 @@
     "default": "操作过于频繁，请稍后再提交 New API 用户 ID。",
     "hint": "用户短时间重复查询 New API 用户时发送。"
   },
+  "campaign_write_busy_content": {
+    "description": "机器人回复文案：当前发放队列繁忙",
+    "type": "string",
+    "default": "当前发放请求较多，请稍后重新发送确认指令。",
+    "hint": "New API 写入并发已满时发送；资格仍保持待确认，不会进入处理中。"
+  },
   "newapi_test_success_content": {
     "description": "机器人回复文案：New API 连接测试成功。",
     "type": "text",

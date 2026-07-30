@@ -5,6 +5,9 @@
   "pages": {
     "gift_codes": {
       "title": "新人礼管理"
+    },
+    "campaigns": {
+      "title": "抽奖与补偿调度台"
     }
   }
 }

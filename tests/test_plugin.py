@@ -363,6 +363,89 @@ async def test_restart_baseline_sync_cannot_absorb_concurrent_join(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_events_during_first_baseline_stay_ineligible(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    member_list_entered = asyncio.Event()
+    release_member_list = asyncio.Event()
+
+    class BlockingBot(FakeBot):
+        async def call_action(self, action, **params):
+            self.calls.append((action, params))
+            if action == "get_group_member_list":
+                member_list_entered.set()
+                await release_member_list.wait()
+                return [{"user_id": 200}, {"user_id": 201}]
+            return {"message_id": 1}
+
+    bot = BlockingBot()
+    plugin = TransferStationPlugin(FakeContext(bot), {})
+    events = [
+        FakeEvent(
+            raw={
+                "post_type": "notice",
+                "notice_type": "group_increase",
+                "group_id": 100,
+                "user_id": user_id,
+                "self_id": 999,
+            },
+            sender_id=str(user_id),
+            bot=bot,
+        )
+        for user_id in (200, 201)
+    ]
+    tasks = [
+        asyncio.create_task(plugin.handle_aiocqhttp_event(event)) for event in events
+    ]
+    await member_list_entered.wait()
+    while len(plugin._pending_group_increases.get("100", set())) < 2:
+        await asyncio.sleep(0)
+    release_member_list.set()
+    await asyncio.gather(*tasks)
+
+    assert await plugin.storage.is_eligible("100", "200") is False
+    assert await plugin.storage.is_eligible("100", "201") is False
+    assert [event.sent for event in events] == [[], []]
+
+
+@pytest.mark.asyncio
+async def test_late_join_event_cannot_promote_permanently_known_baseline_user(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    first = TransferStationPlugin(FakeContext(), {})
+    await first.storage.record_group_baseline("100", ["111"])
+    bot = FakeBot(
+        action_results={
+            "get_group_member_list": [{"user_id": 111}, {"user_id": 222}],
+        }
+    )
+    reloaded = TransferStationPlugin(FakeContext(bot), {})
+    assert await reloaded._sync_group_baseline(bot, "100") is True
+    assert await reloaded.storage.register_newcomer("100", "222") == "known"
+    event = FakeEvent(
+        raw={
+            "post_type": "notice",
+            "notice_type": "group_increase",
+            "group_id": 100,
+            "user_id": 222,
+            "self_id": 999,
+        },
+        sender_id="222",
+        bot=bot,
+    )
+
+    await reloaded.handle_aiocqhttp_event(event)
+
+    assert await reloaded.storage.is_eligible("100", "222") is False
+    assert await reloaded.storage.register_newcomer("100", "222") == "known"
+    assert event.sent == []
+
+
+@pytest.mark.asyncio
 async def test_bot_join_and_unlisted_group_are_ignored(tmp_path, monkeypatch):
     monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
     plugin = TransferStationPlugin(
@@ -746,6 +829,362 @@ async def test_scheduler_delays_draw_when_member_list_is_empty(tmp_path, monkeyp
     current = await plugin.lottery_storage.get_activity(int(activity["id"]))
     assert current["status"] == "open"
     assert await plugin.lottery_storage.winners(int(activity["id"])) == []
+
+
+@pytest.mark.asyncio
+async def test_page_draw_rejects_empty_member_list(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    bot = FakeBot(action_results={"get_group_member_list": []})
+    plugin = TransferStationPlugin(
+        FakeContext(bot),
+        {"lottery_enabled": True},
+    )
+    now = campaign_utils.utc_now()
+    activity = await plugin.lottery_storage.create_draft(
+        "100",
+        "Page 空成员列表",
+        "1",
+        now=now,
+    )
+    await plugin.lottery_storage.add_prize("100", "奖品", 1, "1")
+    await plugin.lottery_storage.publish(
+        "100",
+        await FakeNewApi().status_snapshot(),
+        now=now,
+    )
+    await plugin.lottery_storage.register(
+        "100",
+        "200",
+        "参与抽奖",
+        now=now,
+    )
+
+    result = await plugin._draw_lottery_from_page(int(activity["id"]))
+
+    assert result.key == "lottery_member_list_failed"
+    assert (await plugin.lottery_storage.get_activity(int(activity["id"])))[
+        "status"
+    ] == "open"
+    assert await plugin.lottery_storage.winners(int(activity["id"])) == []
+
+
+@pytest.mark.asyncio
+async def test_notification_timeout_releases_lease(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    monkeypatch.setattr(main, "CAMPAIGN_NOTIFICATION_TIMEOUT_SECONDS", 0.01)
+    plugin = TransferStationPlugin(FakeContext(), {"lottery_enabled": True})
+    now = campaign_utils.utc_now()
+    activity = await plugin.lottery_storage.create_draft(
+        "100",
+        "超时通知",
+        "1",
+        now=now,
+    )
+    await plugin.lottery_storage.add_prize("100", "奖品", 1, "1")
+    await plugin.lottery_storage.publish(
+        "100",
+        await FakeNewApi().status_snapshot(),
+        now=now,
+    )
+    release = asyncio.Event()
+
+    async def sender(_result):
+        await release.wait()
+
+    try:
+        with pytest.raises(TimeoutError):
+            await plugin._send_persisted_notification(
+                campaign_utils.ActionResult(
+                    "lottery_published",
+                    {"activity_id": str(activity["id"])},
+                ),
+                sender,
+            )
+    finally:
+        release.set()
+
+    reclaimed = await plugin.lottery_storage.claim_notification(
+        int(activity["id"]),
+        "lottery_published",
+    )
+    assert reclaimed is not None
+
+
+@pytest.mark.asyncio
+async def test_campaign_write_gate_limits_concurrency(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    monkeypatch.setattr(main, "CAMPAIGN_WRITE_QUEUE_TIMEOUT_SECONDS", 0.01)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {
+            "enabled": False,
+            "lottery_enabled": True,
+        },
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    active = 0
+    maximum = 0
+
+    class BlockingService:
+        async def confirm(self, _group_id, _user_id):
+            nonlocal calls, active, maximum
+            calls += 1
+            active += 1
+            maximum = max(maximum, active)
+            if active == main.CAMPAIGN_WRITE_CONCURRENCY:
+                entered.set()
+            try:
+                await release.wait()
+                return campaign_utils.ActionResult("lottery_paid")
+            finally:
+                active -= 1
+
+    service = BlockingService()
+    monkeypatch.setattr(plugin, "_lottery_service", lambda **_kwargs: service)
+    events = [
+        FakeEvent(
+            sender_id=str(200 + index),
+            messages=[Comp.At(qq="999"), Comp.Plain("确认 抽奖")],
+        )
+        for index in range(8)
+    ]
+    rejected = 0
+    all_rejected = asyncio.Event()
+    for event in events:
+        original_send = event.send
+
+        async def tracked_send(result, *, send=original_send):
+            nonlocal rejected
+            await send(result)
+            if "当前发放请求较多" in str(result):
+                rejected += 1
+                if rejected == len(events) - main.CAMPAIGN_WRITE_CONCURRENCY:
+                    all_rejected.set()
+
+        event.send = tracked_send
+    tasks = [
+        asyncio.create_task(plugin.handle_aiocqhttp_event(event)) for event in events
+    ]
+    await entered.wait()
+    await all_rejected.wait()
+    release.set()
+    await asyncio.gather(*tasks)
+
+    assert calls == main.CAMPAIGN_WRITE_CONCURRENCY
+    assert maximum == main.CAMPAIGN_WRITE_CONCURRENCY
+    assert (
+        sum("当前发放请求较多" in event.sent[0] for event in events)
+        == len(events) - main.CAMPAIGN_WRITE_CONCURRENCY
+    )
+
+
+@pytest.mark.asyncio
+async def test_processing_recovery_runs_periodically(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    monkeypatch.setattr(main, "CAMPAIGN_SCHEDULER_SECONDS", 0.01)
+    plugin = TransferStationPlugin(FakeContext(), {})
+    calls = 0
+    repeated = asyncio.Event()
+
+    async def recover():
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            repeated.set()
+        return 0, 0
+
+    monkeypatch.setattr(plugin, "_recover_stale_processing", recover)
+    task = asyncio.create_task(plugin._processing_recovery_loop())
+    try:
+        await repeated.wait()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_processing_recovery_continues_after_one_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    monkeypatch.setattr(main, "CAMPAIGN_SCHEDULER_SECONDS", 0)
+    plugin = TransferStationPlugin(FakeContext(), {})
+    calls = 0
+    second_call = asyncio.Event()
+
+    async def recover():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first recovery failed")
+        second_call.set()
+        return 0, 0
+
+    monkeypatch.setattr(plugin, "_recover_stale_processing", recover)
+    task = asyncio.create_task(plugin._processing_recovery_loop())
+    try:
+        await second_call.wait()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_gift_recovery_continues_after_one_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    monkeypatch.setattr(main, "CAMPAIGN_SCHEDULER_SECONDS", 0)
+    plugin = TransferStationPlugin(FakeContext(), {})
+    calls = 0
+    second_call = asyncio.Event()
+
+    async def recover_reserved(*, stale_before):
+        nonlocal calls
+        assert stale_before
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first gift recovery failed")
+        second_call.set()
+        return 0
+
+    monkeypatch.setattr(plugin.storage, "recover_reserved", recover_reserved)
+    task = asyncio.create_task(plugin._gift_recovery_loop())
+    try:
+        await second_call.wait()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_processing_recovery_uses_fixed_maximum_request_window(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    fixed_now = campaign_utils.utc_now()
+    monkeypatch.setattr(main, "utc_now", lambda: fixed_now)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {"newapi_timeout_seconds": 1},
+    )
+    cutoffs = []
+
+    async def lottery_recover(*, now, stale_before):
+        assert now == fixed_now
+        cutoffs.append(stale_before)
+        return 0
+
+    async def compensation_recover(*, now, stale_before):
+        assert now == fixed_now
+        cutoffs.append(stale_before)
+        return 0
+
+    monkeypatch.setattr(plugin.lottery_storage, "recover_processing", lottery_recover)
+    monkeypatch.setattr(
+        plugin.compensation_storage,
+        "recover_processing",
+        compensation_recover,
+    )
+
+    await plugin._recover_stale_processing()
+
+    expected = fixed_now - timedelta(
+        seconds=main.MAX_NEWAPI_TIMEOUT_SECONDS + main.CAMPAIGN_SCHEDULER_SECONDS * 2
+    )
+    assert cutoffs == [expected, expected]
+
+
+@pytest.mark.asyncio
+async def test_notification_finalize_survives_cancellation(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(FakeContext(), {"lottery_enabled": True})
+    now = campaign_utils.utc_now()
+    activity = await plugin.lottery_storage.create_draft(
+        "100",
+        "取消保护",
+        "1",
+        now=now,
+    )
+    await plugin.lottery_storage.add_prize("100", "奖品", 1, "1")
+    await plugin.lottery_storage.publish(
+        "100",
+        await FakeNewApi().status_snapshot(),
+        now=now,
+    )
+    finalize_entered = asyncio.Event()
+    release_finalize = asyncio.Event()
+    original_mark = plugin.lottery_storage.mark_notification_sent
+
+    async def blocked_mark(notification_id, lease_marker):
+        finalize_entered.set()
+        await release_finalize.wait()
+        return await original_mark(notification_id, lease_marker)
+
+    monkeypatch.setattr(
+        plugin.lottery_storage,
+        "mark_notification_sent",
+        blocked_mark,
+    )
+
+    async def sender(_result):
+        return None
+
+    task = asyncio.create_task(
+        plugin._send_persisted_notification(
+            campaign_utils.ActionResult(
+                "lottery_published",
+                {"activity_id": str(activity["id"])},
+            ),
+            sender,
+        )
+    )
+    await finalize_entered.wait()
+    task.cancel()
+    release_finalize.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert await plugin.lottery_storage.list_pending_notifications() == []
+
+
+@pytest.mark.asyncio
+async def test_campaign_group_notifications_use_plain_text_segments(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    bot = FakeBot()
+    plugin = TransferStationPlugin(
+        FakeContext(bot),
+        {"lottery_enabled": True},
+    )
+    now = campaign_utils.utc_now()
+    await plugin.lottery_storage.create_draft(
+        "100",
+        "[CQ:at,qq=all]",
+        "1",
+        now=now,
+    )
+    await plugin.lottery_storage.add_prize("100", "奖品", 1, "1")
+    await plugin.lottery_storage.publish(
+        "100",
+        await FakeNewApi().status_snapshot(),
+        now=now,
+    )
+
+    await plugin._flush_campaign_notifications()
+
+    message = next(
+        params["message"] for action, params in bot.calls if action == "send_group_msg"
+    )
+    assert message[0]["type"] == "text"
+    assert "[CQ:at,qq=all]" in message[0]["data"]["text"]
 
 
 @pytest.mark.asyncio

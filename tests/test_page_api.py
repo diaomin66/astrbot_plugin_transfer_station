@@ -139,7 +139,8 @@ async def test_page_routes_and_inventory_operations(tmp_path):
 
 @pytest.mark.asyncio
 async def test_page_rejects_invalid_payload_and_pagination(tmp_path):
-    api = GiftPageApi(FakeContext(), GiftStorage(tmp_path / "gifts.db"))
+    storage = GiftStorage(tmp_path / "gifts.db")
+    api = GiftPageApi(FakeContext(), storage)
 
     with request_context("POST", "/codes/import", payload={"content": ""}):
         empty = await api.import_codes()
@@ -152,6 +153,25 @@ async def test_page_rejects_invalid_payload_and_pagination(tmp_path):
     ):
         invalid_page = await api.get_codes()
     assert invalid_page.status_code == 400
+
+    for query in (
+        {"page": "abc"},
+        {"page": "1.9"},
+        {"page_size": "20.5"},
+    ):
+        with request_context("GET", "/codes", query=query):
+            invalid = await api.get_codes()
+        assert invalid.status_code == 400
+
+    await storage.import_codes(["SAFE-CODE"])
+    with request_context(
+        "POST",
+        "/codes/delete",
+        payload={"id": 1.9},
+    ):
+        invalid_delete = await api.delete_code_bridge()
+    assert invalid_delete.status_code == 400
+    assert (await storage.list_codes(1, 20))["total"] == 1
 
     with request_context(
         "POST",
@@ -187,6 +207,15 @@ async def test_page_resolves_ambiguous_gift_delivery(tmp_path):
     ):
         reviews = response_json(await api.get_gift_reviews())
     assert reviews["total"] == 1
+
+    with request_context(
+        "POST",
+        "/gift-reviews/resolve",
+        payload={"id": 1.9, "delivered": False},
+    ):
+        invalid = await api.resolve_gift_review()
+    assert invalid.status_code == 400
+    assert (await storage.list_gift_reviews(1, 20))["total"] == 1
 
     with request_context(
         "POST",

@@ -5,10 +5,18 @@ import { JSDOM } from "jsdom";
 
 const root = new URL("../../", import.meta.url);
 
-const settle = async (window, turns = 6) => {
-  for (let index = 0; index < turns; index += 1) {
+const settle = async (window, timeoutMs = 3000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     await new Promise((resolve) => window.setTimeout(resolve, 0));
+    if (
+      window.__testBridgeState.pending === 0 &&
+      !window.document.querySelector("#refreshButton").disabled
+    ) {
+      return;
+    }
   }
+  throw new Error("Timed out waiting for gift Page requests to settle");
 };
 
 async function loadPage(relativeHtml, relativeScript, bridge) {
@@ -20,7 +28,21 @@ async function loadPage(relativeHtml, relativeScript, bridge) {
     pretendToBeVisual: true,
   });
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
-  dom.window.AstrBotPluginPage = bridge;
+  const bridgeState = { pending: 0 };
+  const trackedBridge = { ...bridge };
+  for (const method of ["ready", "apiGet", "apiPost"]) {
+    const original = bridge[method].bind(bridge);
+    trackedBridge[method] = async (...args) => {
+      bridgeState.pending += 1;
+      try {
+        return await original(...args);
+      } finally {
+        bridgeState.pending -= 1;
+      }
+    };
+  }
+  dom.window.__testBridgeState = bridgeState;
+  dom.window.AstrBotPluginPage = trackedBridge;
   dom.window.eval(script);
   await settle(dom.window);
   return dom;

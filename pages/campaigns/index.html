@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>抽奖与补偿调度台</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="masthead">
+        <div class="masthead__eyebrow">
+          <span class="signal-dot" aria-hidden="true"></span>
+          TRANSFER STATION / CAMPAIGN CONTROL
+        </div>
+        <div class="masthead__main">
+          <div>
+            <h1>活动调度台</h1>
+            <p>抽奖、补偿与 New API 发放状态的独立运营界面</p>
+          </div>
+          <div class="masthead__actions">
+            <span id="freshnessBadge" class="freshness-badge">正在同步</span>
+            <button id="refreshAllButton" class="button button--ghost" type="button">
+              刷新数据
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <section class="status-rail" aria-label="系统状态">
+          <article class="status-card status-card--newapi">
+            <span class="status-card__index">01</span>
+            <div>
+              <span class="status-card__label">NEW API</span>
+              <strong id="newapiStatus">等待验证</strong>
+              <small id="newapiCredentialState">读取配置中</small>
+            </div>
+            <button id="newapiTestButton" class="button button--compact" type="button">
+              测试连接
+            </button>
+          </article>
+          <article class="status-card">
+            <span class="status-card__index">02</span>
+            <div>
+              <span class="status-card__label">LOTTERY</span>
+              <strong id="lotteryFeatureState">读取中</strong>
+              <small id="lotteryGroupState">—</small>
+            </div>
+          </article>
+          <article class="status-card">
+            <span class="status-card__index">03</span>
+            <div>
+              <span class="status-card__label">COMPENSATION</span>
+              <strong id="compensationFeatureState">读取中</strong>
+              <small id="compensationGroupState">—</small>
+            </div>
+          </article>
+        </section>
+
+        <section class="kpi-grid" aria-label="活动统计">
+          <article class="kpi">
+            <span>进行中抽奖</span>
+            <strong id="lotteryActiveCount">0</strong>
+            <small id="lotteryTotalCount">累计 0 场</small>
+          </article>
+          <article class="kpi">
+            <span>抽奖参与 / 中奖</span>
+            <strong><b id="lotteryParticipantCount">0</b> / <b id="lotteryWinnerCount">0</b></strong>
+            <small id="lotteryPaidCount">已发放 0 人</small>
+          </article>
+          <article class="kpi kpi--alert">
+            <span>抽奖待人工核查</span>
+            <strong id="lotteryReviewCount">0</strong>
+            <small>冻结资格，禁止自动重试</small>
+          </article>
+          <article class="kpi">
+            <span>进行中补偿</span>
+            <strong id="compensationActiveCount">0</strong>
+            <small id="compensationTotalCount">累计 0 场</small>
+          </article>
+          <article class="kpi">
+            <span>补偿记录 / 已到账</span>
+            <strong><b id="compensationRecordCount">0</b> / <b id="compensationPaidCount">0</b></strong>
+            <small id="compensationQuotaCount">占用原始 quota 0</small>
+          </article>
+          <article class="kpi kpi--alert">
+            <span>补偿待人工核查</span>
+            <strong id="compensationReviewCount">0</strong>
+            <small>冻结预算，等待管理员结论</small>
+          </article>
+        </section>
+
+        <nav class="module-tabs" aria-label="活动模块">
+          <button class="module-tab is-active" data-module="lottery" type="button">
+            抽奖系统
+          </button>
+          <button class="module-tab" data-module="compensation" type="button">
+            补偿系统
+          </button>
+          <button class="module-tab" data-module="settings" type="button">
+            连接与范围
+          </button>
+        </nav>
+
+        <section id="lotteryModule" class="module-panel is-active">
+          <div class="module-heading">
+            <div>
+              <span class="section-kicker">LOTTERY OPERATIONS</span>
+              <h2>抽奖系统</h2>
+            </div>
+            <p>草稿配置、分级奖项、发布、开奖与中奖发放核查</p>
+          </div>
+
+          <div class="operation-layout">
+            <aside class="command-card">
+              <div class="card-heading">
+                <div>
+                  <span class="card-heading__serial">L-NEW</span>
+                  <h3>创建抽奖草稿</h3>
+                </div>
+              </div>
+              <form id="lotteryCreateForm" class="form-stack">
+                <label>
+                  <span>QQ群号</span>
+                  <input id="lotteryCreateGroup" name="group_id" inputmode="numeric" required />
+                </label>
+                <label>
+                  <span>活动标题</span>
+                  <input id="lotteryCreateTitle" name="title" maxlength="100" required />
+                </label>
+                <button class="button button--primary" type="submit">建立草稿</button>
+              </form>
+              <p class="form-note">同一群只能存在一场未结束抽奖。默认立即开始、1 小时后开奖。</p>
+            </aside>
+
+            <div class="live-board">
+              <div class="card-heading">
+                <div>
+                  <span class="card-heading__serial">L-LIVE</span>
+                  <h3>当前抽奖</h3>
+                </div>
+                <span id="lotteryLiveCount" class="count-chip">0 场</span>
+              </div>
+              <div id="lotteryLiveList" class="activity-grid" aria-live="polite"></div>
+            </div>
+          </div>
+
+          <div id="lotteryDetailPanel" class="detail-panel is-empty">
+            <div class="empty-state">
+              <span>SELECT ACTIVITY</span>
+              <strong>选择一场当前或历史抽奖查看详情</strong>
+            </div>
+          </div>
+
+          <section class="history-board">
+            <div class="history-toolbar">
+              <div>
+                <span class="section-kicker">ARCHIVE / LOTTERY</span>
+                <h3>抽奖历史</h3>
+              </div>
+              <form id="lotteryHistoryFilter" class="inline-filter">
+                <input id="lotteryHistoryGroup" inputmode="numeric" placeholder="按群号筛选" />
+                <button class="button button--compact" type="submit">查询</button>
+              </form>
+            </div>
+            <div id="lotteryHistoryList" class="history-list"></div>
+            <div class="pagination">
+              <button id="lotteryHistoryPrev" class="button button--ghost" type="button">上一页</button>
+              <span id="lotteryHistoryPage">第 1 页</span>
+              <button id="lotteryHistoryNext" class="button button--ghost" type="button">下一页</button>
+            </div>
+          </section>
+        </section>
+
+        <section id="compensationModule" class="module-panel">
+          <div class="module-heading">
+            <div>
+              <span class="section-kicker">COMPENSATION OPERATIONS</span>
+              <h2>补偿系统</h2>
+            </div>
+            <p>按持续时间或预算运行，QQ 与 New API ID 在单场内双重去重</p>
+          </div>
+
+          <div class="operation-layout">
+            <aside class="command-card">
+              <div class="card-heading">
+                <div>
+                  <span class="card-heading__serial">C-NEW</span>
+                  <h3>开启补偿</h3>
+                </div>
+              </div>
+              <form id="compensationOpenForm" class="form-stack">
+                <label>
+                  <span>QQ群号</span>
+                  <input id="compensationGroup" inputmode="numeric" required />
+                </label>
+                <label>
+                  <span>标题</span>
+                  <input id="compensationTitle" maxlength="100" placeholder="服务异常补偿" />
+                </label>
+                <div class="form-grid">
+                  <label>
+                    <span>每人额度</span>
+                    <input id="compensationPerAmount" inputmode="decimal" required />
+                  </label>
+                  <label>
+                    <span>持续时间</span>
+                    <input id="compensationDuration" value="2h" placeholder="2h 或 -" required />
+                  </label>
+                </div>
+                <label>
+                  <span>总金额</span>
+                  <input id="compensationTotalAmount" value="-" placeholder="1000 或 -" required />
+                </label>
+                <button class="button button--primary" type="submit">立即开启</button>
+              </form>
+              <p class="form-note">持续时间和总金额至少限制一项；两项同时设置时，任一条件先满足即结束。</p>
+            </aside>
+
+            <div class="live-board">
+              <div class="card-heading">
+                <div>
+                  <span class="card-heading__serial">C-LIVE</span>
+                  <h3>当前补偿</h3>
+                </div>
+                <span id="compensationLiveCount" class="count-chip">0 场</span>
+              </div>
+              <div id="compensationLiveList" class="activity-grid" aria-live="polite"></div>
+            </div>
+          </div>
+
+          <div id="compensationDetailPanel" class="detail-panel is-empty">
+            <div class="empty-state">
+              <span>SELECT ACTIVITY</span>
+              <strong>选择一场当前或历史补偿查看详情</strong>
+            </div>
+          </div>
+
+          <section class="history-board">
+            <div class="history-toolbar">
+              <div>
+                <span class="section-kicker">ARCHIVE / COMPENSATION</span>
+                <h3>补偿历史</h3>
+              </div>
+              <form id="compensationHistoryFilter" class="inline-filter">
+                <input id="compensationHistoryGroup" inputmode="numeric" placeholder="按群号筛选" />
+                <button class="button button--compact" type="submit">查询</button>
+              </form>
+            </div>
+            <div id="compensationHistoryList" class="history-list"></div>
+            <div class="pagination">
+              <button id="compensationHistoryPrev" class="button button--ghost" type="button">上一页</button>
+              <span id="compensationHistoryPage">第 1 页</span>
+              <button id="compensationHistoryNext" class="button button--ghost" type="button">下一页</button>
+            </div>
+          </section>
+        </section>
+
+        <section id="settingsModule" class="module-panel">
+          <div class="module-heading">
+            <div>
+              <span class="section-kicker">CONNECTION / SCOPE</span>
+              <h2>连接与启用范围</h2>
+            </div>
+            <p>凭据仍在 AstrBot 插件设置中维护；本页不读取、不显示、不保存密码或令牌</p>
+          </div>
+
+          <form id="settingsForm" class="settings-grid">
+            <section class="settings-card settings-card--wide">
+              <div class="card-heading">
+                <div>
+                  <span class="card-heading__serial">API</span>
+                  <h3>New API 连接</h3>
+                </div>
+                <span id="settingsRevision" class="revision-chip">REV —</span>
+              </div>
+              <div class="form-stack">
+                <label>
+                  <span>站点根地址</span>
+                  <input id="settingsBaseUrl" type="url" placeholder="https://newapi.example.com" />
+                </label>
+                <div class="form-grid form-grid--three">
+                  <label>
+                    <span>超时秒数</span>
+                    <input id="settingsTimeout" type="number" min="1" max="120" />
+                  </label>
+                  <label class="toggle-row">
+                    <input id="settingsVerifySsl" type="checkbox" />
+                    <span>验证 TLS 证书</span>
+                  </label>
+                  <label class="toggle-row toggle-row--danger">
+                    <input id="settingsAllowHttp" type="checkbox" />
+                    <span>允许不安全 HTTP</span>
+                  </label>
+                </div>
+                <div id="credentialSummary" class="credential-summary"></div>
+              </div>
+            </section>
+
+            <section class="settings-card">
+              <div class="card-heading">
+                <div>
+                  <span class="card-heading__serial">LOTTERY</span>
+                  <h3>抽奖范围</h3>
+                </div>
+                <label class="switch">
+                  <input id="settingsLotteryEnabled" type="checkbox" />
+                  <span></span>
+                </label>
+              </div>
+              <label>
+                <span>启用群白名单</span>
+                <textarea id="settingsLotteryGroups" rows="8" placeholder="每行一个 QQ 群号；留空表示全部群"></textarea>
+              </label>
+            </section>
+
+            <section class="settings-card">
+              <div class="card-heading">
+                <div>
+                  <span class="card-heading__serial">COMP</span>
+                  <h3>补偿范围</h3>
+                </div>
+                <label class="switch">
+                  <input id="settingsCompensationEnabled" type="checkbox" />
+                  <span></span>
+                </label>
+              </div>
+              <label>
+                <span>启用群白名单</span>
+                <textarea id="settingsCompensationGroups" rows="8" placeholder="每行一个 QQ 群号；留空表示全部群"></textarea>
+              </label>
+            </section>
+
+            <div class="settings-actions">
+              <div>
+                <strong id="settingsDirtyState">设置已同步</strong>
+                <small id="settingsConflictState">自动刷新不会覆盖未保存内容</small>
+              </div>
+              <div class="settings-actions__buttons">
+                <button id="settingsReloadButton" class="button button--ghost" type="button">
+                  载入远端设置
+                </button>
+                <button id="settingsSaveButton" class="button button--primary" type="submit">
+                  保存设置
+                </button>
+              </div>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <div id="reasonModal" class="reason-modal" hidden>
+      <form id="reasonModalForm" class="reason-modal__panel">
+        <span class="section-kicker">AUDIT REASON</span>
+        <h2 id="reasonModalTitle">请输入操作原因</h2>
+        <textarea
+          id="reasonModalInput"
+          rows="5"
+          maxlength="300"
+          placeholder="可以留空"
+        ></textarea>
+        <div class="reason-modal__actions">
+          <button id="reasonModalCancel" class="button button--ghost" type="button">
+            返回
+          </button>
+          <button class="button button--danger" type="submit">继续操作</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

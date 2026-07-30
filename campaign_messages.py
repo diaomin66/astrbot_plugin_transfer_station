@@ -5,6 +5,7 @@ CAMPAIGN_TEXT_DEFAULTS = {
     "campaign_feature_disabled": "当前群未启用该功能。",
     "campaign_invalid_argument": "参数格式错误，请发送对应的帮助指令查看用法。",
     "campaign_rate_limited": "操作过于频繁，请稍后再提交 New API 用户 ID。",
+    "campaign_write_busy": "当前发放请求较多，请稍后重新发送确认指令。",
     "newapi_test_success": (
         "New API 连接测试成功。\n"
         "版本：{version}\n账号：{username}\n角色：{role}\n额度显示：{display_type}"

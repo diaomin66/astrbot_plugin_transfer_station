@@ -6,14 +6,19 @@ import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from weakref import WeakKeyDictionary
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 
+from .sqlite_utils import open_sqlite
+
 SCHEMA_VERSION = 3
 MAX_IMPORT_CODES = 10000
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _SHARED_INIT_LOCKS: WeakKeyDictionary[
     asyncio.AbstractEventLoop,
     dict[str, asyncio.Lock],
@@ -69,7 +74,7 @@ class GiftStorage:
         async with _shared_init_lock(self.db_path):
             if self._initialized:
                 return
-            async with aiosqlite.connect(self.db_path) as db:
+            async with open_sqlite(self.db_path) as db:
                 await db.execute("PRAGMA busy_timeout=5000")
                 await db.execute("PRAGMA journal_mode=WAL")
                 await db.execute("PRAGMA foreign_keys=ON")
@@ -177,8 +182,9 @@ class GiftStorage:
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[aiosqlite.Connection]:
         await self.initialize()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with open_sqlite(self.db_path) as db:
             db.row_factory = sqlite3.Row
+            await db.execute("PRAGMA busy_timeout=5000")
             await db.execute("PRAGMA foreign_keys=ON")
             yield db
 
@@ -201,7 +207,7 @@ class GiftStorage:
         self,
         group_id: str,
         user_ids: list[str],
-    ) -> dict[str, int | bool]:
+    ) -> dict[str, Any]:
         group_id = str(group_id).strip()
         normalized = sorted(
             {str(user_id).strip() for user_id in user_ids if str(user_id).strip()}
@@ -219,6 +225,7 @@ class GiftStorage:
 
             now = utc_now()
             inserted_users = 0
+            inserted_user_ids: list[str] = []
             for user_id in normalized:
                 cursor = await db.execute(
                     """
@@ -230,6 +237,8 @@ class GiftStorage:
                     (user_id, group_id, now),
                 )
                 inserted_users += cursor.rowcount
+                if cursor.rowcount:
+                    inserted_user_ids.append(user_id)
 
             await db.execute(
                 """
@@ -246,6 +255,7 @@ class GiftStorage:
                 "created": created,
                 "members": len(normalized),
                 "inserted_users": inserted_users,
+                "inserted_user_ids": inserted_user_ids,
             }
 
     async def register_newcomer(self, group_id: str, user_id: str) -> str:
@@ -430,47 +440,76 @@ class GiftStorage:
             "has_more": offset + page_size < total,
         }
 
-    async def summary(self) -> dict[str, int]:
+    async def summary(self, *, now: datetime | None = None) -> dict[str, int]:
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=UTC)
+        local_now = current.astimezone(SHANGHAI_TZ)
+        local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_utc = local_start.astimezone(UTC).isoformat(timespec="seconds")
+        end_utc = (
+            (local_start + timedelta(days=1))
+            .astimezone(UTC)
+            .isoformat(timespec="seconds")
+        )
         async with self._connection() as db:
             queries = {
-                "available_codes": """
+                "available_codes": (
+                    """
                     SELECT COUNT(*) AS value
                     FROM gift_codes AS gc
                     LEFT JOIN gift_reservations AS gr ON gr.code_id = gc.id
                     WHERE gr.id IS NULL
-                """,
-                "gift_manual_reviews": """
+                    """,
+                    (),
+                ),
+                "gift_manual_reviews": (
+                    """
                     SELECT COUNT(*) AS value
                     FROM gift_reservations
                     WHERE status = 'manual_review'
-                """,
-                "claimed_users": "SELECT COUNT(*) AS value FROM claims",
-                "eligible_members": """
+                    """,
+                    (),
+                ),
+                "claimed_users": ("SELECT COUNT(*) AS value FROM claims", ()),
+                "eligible_members": (
+                    """
                     SELECT COUNT(*) AS value
                     FROM known_users
                     WHERE source = 'newcomer'
-                """,
-                "pending_newcomers": """
+                    """,
+                    (),
+                ),
+                "pending_newcomers": (
+                    """
                     SELECT COUNT(*) AS value
                     FROM known_users
                     LEFT JOIN claims ON claims.user_id = known_users.user_id
                     WHERE known_users.source = 'newcomer'
                       AND claims.user_id IS NULL
-                """,
-                "known_users": """
+                    """,
+                    (),
+                ),
+                "known_users": (
+                    """
                     SELECT COUNT(*) AS value
                     FROM known_users
-                """,
-                "today_newcomers": """
+                    """,
+                    (),
+                ),
+                "today_newcomers": (
+                    """
                     SELECT COUNT(*) AS value
                     FROM known_users
                     WHERE source = 'newcomer'
-                      AND date(first_seen_at, 'localtime') = date('now', 'localtime')
-                """,
+                      AND first_seen_at >= ? AND first_seen_at < ?
+                    """,
+                    (start_utc, end_utc),
+                ),
             }
             result: dict[str, int] = {}
-            for key, query in queries.items():
-                cursor = await db.execute(query)
+            for key, (query, params) in queries.items():
+                cursor = await db.execute(query, params)
                 row = await cursor.fetchone()
                 result[key] = int(row["value"]) if row else 0
             return result

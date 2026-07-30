@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "npm run test:pages",
     "test:pages": "node --test tests/js/*.test.mjs"
   },
   "devDependencies": {
