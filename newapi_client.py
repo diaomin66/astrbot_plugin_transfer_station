@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, DecimalException, InvalidOperation
 from typing import Any
@@ -30,6 +31,48 @@ class NewApiError(RuntimeError):
     @property
     def ambiguous(self) -> bool:
         return self.kind == "ambiguous"
+
+
+def public_newapi_error(exc: NewApiError | None = None) -> str:
+    """Return an actionable error without exposing credentials or full responses."""
+    if exc is None:
+        return "连接或配置不可用"
+
+    raw = str(exc).strip()
+    lowered = raw.lower()
+    if "new-api-user" in lowered or "user id not provided" in lowered:
+        return "旧版 New API 认证还需要配置超管用户数字 ID"
+    if exc.kind == "config":
+        return raw or "New API 配置无效"
+    if exc.kind == "2fa":
+        return "账号启用了 2FA，请改用系统访问令牌"
+    if exc.status_code == 401:
+        return (
+            "认证失败（401），请确认填写的是系统访问令牌而非模型 API 密钥；"
+            "旧版站点还需配置超管用户数字 ID"
+        )
+    if exc.status_code == 403:
+        return "权限不足（403），请使用具备用户管理权限的管理员或超管账号"
+    if exc.status_code == 404:
+        return "接口不存在（404），请确认填写站点根地址且 New API 版本兼容"
+    if exc.status_code is not None and exc.status_code >= 500:
+        return f"New API 服务端错误（{exc.status_code}）"
+    if exc.ambiguous:
+        return "请求结果不明确，请检查 New API 状态并按人工核查流程处理"
+    if "网络" in raw or "超时" in raw:
+        return raw
+    if not raw or raw in {"New API 操作失败", "New API 请求被拒绝"}:
+        return "上游未提供具体原因，请检查系统访问令牌、管理权限和站点版本"
+
+    sanitized = re.sub(
+        r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+",
+        "Bearer ***",
+        raw,
+    )
+    sanitized = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}", "sk-***", sanitized)
+    if "<" in sanitized or ">" in sanitized:
+        return "New API 返回了无法识别的错误内容"
+    return sanitized[:200]
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,9 +192,12 @@ class NewApiClient:
             follow_redirects=False,
         )
         self._configured_token = str(self.config.get("newapi_access_token", "")).strip()
+        self._configured_user_id = self._user_id()
         self._username = str(self.config.get("newapi_username", "")).strip()
         self._password = str(self.config.get("newapi_password", ""))
         self._session_token = ""
+        self._session_user_id = ""
+        self._session_authenticated = False
         self._login_lock = asyncio.Lock()
 
     @staticmethod
@@ -159,6 +205,7 @@ class NewApiClient:
         return (
             str(config.get("newapi_base_url", "")).strip().rstrip("/"),
             str(config.get("newapi_access_token", "")).strip(),
+            str(config.get("newapi_user_id", "")).strip(),
             str(config.get("newapi_username", "")).strip(),
             str(config.get("newapi_password", "")),
             config.get("newapi_timeout_seconds", 10),
@@ -172,6 +219,22 @@ class NewApiClient:
         except (TypeError, ValueError):
             value = 10
         return min(120.0, max(1.0, value))
+
+    def _user_id(self) -> str:
+        raw = str(self.config.get("newapi_user_id", "")).strip()
+        if not raw:
+            return ""
+        if (
+            not raw.isascii()
+            or not raw.isdigit()
+            or int(raw) <= 0
+            or int(raw) > MAX_NEWAPI_USER_ID
+        ):
+            raise NewApiError(
+                "New API 用户数字 ID 必须是正整数",
+                kind="config",
+            )
+        return str(int(raw))
 
     @property
     def request_timeout_seconds(self) -> float:
@@ -206,7 +269,7 @@ class NewApiClient:
 
     async def _login(self) -> None:
         async with self._login_lock:
-            if self._session_token:
+            if self._session_authenticated:
                 return
             if not self._username or not self._password:
                 raise NewApiError(
@@ -228,15 +291,27 @@ class NewApiClient:
                 )
             if isinstance(data, dict):
                 self._session_token = str(data.get("access_token", "")).strip()
+                user_data = data.get("user")
+                if not isinstance(user_data, dict):
+                    user_data = data
+                raw_user_id = str(user_data.get("id", "")).strip()
+                if raw_user_id.isascii() and raw_user_id.isdigit():
+                    normalized_user_id = int(raw_user_id)
+                    if 0 < normalized_user_id <= MAX_NEWAPI_USER_ID:
+                        self._session_user_id = str(normalized_user_id)
+            self._session_authenticated = True
 
     async def _authorization_headers(self) -> dict[str, str]:
         token = self._configured_token or self._session_token
-        if not token and not self._configured_token:
+        if not token and not self._configured_token and not self._session_authenticated:
             await self._login()
             token = self._session_token
         headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        user_id = self._configured_user_id or self._session_user_id
+        if user_id:
+            headers["New-Api-User"] = user_id
         return headers
 
     @staticmethod
@@ -286,6 +361,8 @@ class NewApiClient:
                     ):
                         if not used_token or self._session_token == used_token:
                             self._session_token = ""
+                            self._session_user_id = ""
+                            self._session_authenticated = False
                         refresh_attempted = True
                         continue
 

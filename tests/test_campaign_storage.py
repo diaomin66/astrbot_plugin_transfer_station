@@ -728,6 +728,27 @@ async def test_unexpected_newapi_exception_enters_manual_review(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_lottery_publish_preserves_safe_newapi_error_placeholder(tmp_path):
+    storage = lottery.LotteryStorage(tmp_path / "lottery.db")
+    now = utils.utc_now()
+    await storage.create_draft("100", "认证诊断", "1", now=now)
+    await storage.add_prize("100", "一等奖", 1, "10")
+
+    class UnauthorizedNewApi:
+        async def status_snapshot(self):
+            raise newapi.NewApiError("secret upstream", status_code=401)
+
+    result = await lottery.LotteryService(
+        storage,
+        UnauthorizedNewApi(),
+    ).publish("100", now=now)
+
+    assert result.key == "newapi_error"
+    assert "认证失败" in result.placeholders["error"]
+    assert "secret upstream" not in result.placeholders["error"]
+
+
+@pytest.mark.asyncio
 async def test_review_is_bound_to_activity_id(tmp_path):
     storage = compensation.CompensationStorage(tmp_path / "compensation.db")
     now = utils.utc_now()

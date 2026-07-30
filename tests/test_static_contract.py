@@ -17,7 +17,7 @@ def test_metadata_and_config_contract():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
     assert metadata["name"] == "astrbot_plugin_transfer_station"
-    assert metadata["version"] == "v1.4.0"
+    assert metadata["version"] == "v1.4.1"
     assert metadata["support_platforms"] == ["aiocqhttp"]
     assert metadata["astrbot_version"] == ">=4.26,<5"
     assert [page["name"] for page in metadata["pages"]] == [
@@ -42,6 +42,7 @@ def test_metadata_and_config_contract():
     assert {
         "newapi_base_url",
         "newapi_access_token",
+        "newapi_user_id",
         "newapi_username",
         "newapi_password",
         "newapi_timeout_seconds",
@@ -109,6 +110,8 @@ def test_campaign_page_uses_bridge_and_preserves_large_ids():
     assert "formBaseRevision" in script
     assert "detailGeneration" in script
     assert "settingsReloadButton" in script
+    assert 'id="settingsUserId"' in html
+    assert "newapi_user_id" in script
     assert 'id="reasonModal"' in html
     assert "window.prompt" not in script
     assert "window.confirm" not in script

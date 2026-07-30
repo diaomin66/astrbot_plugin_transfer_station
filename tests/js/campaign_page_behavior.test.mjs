@@ -86,6 +86,7 @@ function settings(revision = "revision-one") {
   return {
     revision,
     newapi_base_url: "https://newapi.example.com",
+    newapi_user_id: "7",
     newapi_timeout_seconds: 10,
     newapi_verify_ssl: true,
     newapi_allow_insecure_http: false,
@@ -330,6 +331,7 @@ test(
       submitted.settings.newapi_base_url,
       "https://saved.example.com",
     );
+    assert.equal(submitted.settings.newapi_user_id, "7");
 
     remoteSettings = saved;
     resolveSave({ message: "已保存", settings: saved, warning: "" });

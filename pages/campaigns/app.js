@@ -55,6 +55,7 @@ const elements = {
   compensationHistoryPage: document.querySelector("#compensationHistoryPage"),
   settingsForm: document.querySelector("#settingsForm"),
   settingsBaseUrl: document.querySelector("#settingsBaseUrl"),
+  settingsUserId: document.querySelector("#settingsUserId"),
   settingsTimeout: document.querySelector("#settingsTimeout"),
   settingsVerifySsl: document.querySelector("#settingsVerifySsl"),
   settingsAllowHttp: document.querySelector("#settingsAllowHttp"),
@@ -412,6 +413,12 @@ function renderCredentialSummary(settings) {
         : "兼容密码：未配置",
       ok: settings.newapi_password_configured,
     },
+    {
+      label: settings.newapi_user_id
+        ? `旧版用户 ID：${settings.newapi_user_id}`
+        : "旧版用户 ID：未配置",
+      ok: Boolean(settings.newapi_user_id),
+    },
   ];
   elements.credentialSummary.replaceChildren(
     ...items.map((item) =>
@@ -450,6 +457,7 @@ function applySettingsForm(settings) {
   state.formBaseRevision = String(settings.revision || "");
   state.settingsDirty = false;
   elements.settingsBaseUrl.value = settings.newapi_base_url || "";
+  elements.settingsUserId.value = settings.newapi_user_id || "";
   elements.settingsTimeout.value = String(settings.newapi_timeout_seconds ?? 10);
   elements.settingsVerifySsl.checked = Boolean(settings.newapi_verify_ssl);
   elements.settingsAllowHttp.checked = Boolean(
@@ -551,6 +559,7 @@ async function saveSettings(event) {
       revision: state.formBaseRevision,
       settings: {
         newapi_base_url: elements.settingsBaseUrl.value.trim(),
+        newapi_user_id: elements.settingsUserId.value.trim(),
         newapi_timeout_seconds: elements.settingsTimeout.value,
         newapi_verify_ssl: elements.settingsVerifySsl.checked,
         newapi_allow_insecure_http: elements.settingsAllowHttp.checked,

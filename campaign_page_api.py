@@ -23,7 +23,12 @@ from .campaign_utils import (
 )
 from .compensation import CompensationService, CompensationStorage
 from .lottery import LotteryService, LotteryStorage
-from .newapi_client import NewApiClient, NewApiError
+from .newapi_client import (
+    MAX_NEWAPI_USER_ID,
+    NewApiClient,
+    NewApiError,
+    public_newapi_error,
+)
 from .page_validation import positive_int
 
 PLUGIN_NAME = "astrbot_plugin_transfer_station"
@@ -32,6 +37,7 @@ MAX_GROUP_FILTERS = 500
 MAX_GROUP_ID_LENGTH = 20
 PAGE_EDITABLE_SETTINGS = (
     "newapi_base_url",
+    "newapi_user_id",
     "newapi_timeout_seconds",
     "newapi_verify_ssl",
     "newapi_allow_insecure_http",
@@ -267,6 +273,16 @@ class CampaignPageApi:
             raise ValueError("群号必须是有效的正整数")
         return normalized
 
+    @staticmethod
+    def _optional_newapi_user_id(value: Any) -> str:
+        normalized = str(value).strip()
+        if not normalized:
+            return ""
+        parsed = positive_int(normalized, "New API 用户数字 ID")
+        if parsed > MAX_NEWAPI_USER_ID:
+            raise ValueError("New API 用户数字 ID 超出安全范围")
+        return str(parsed)
+
     @classmethod
     def _group_ids(cls, value: Any) -> list[str]:
         if not isinstance(value, list):
@@ -297,6 +313,7 @@ class CampaignPageApi:
         return {
             "revision": self._settings_revision(),
             "newapi_base_url": str(self.config.get("newapi_base_url", "")).strip(),
+            "newapi_user_id": str(self.config.get("newapi_user_id", "")).strip(),
             "newapi_timeout_seconds": self.config.get(
                 "newapi_timeout_seconds",
                 10,
@@ -376,23 +393,18 @@ class CampaignPageApi:
     def _newapi_error(exc: NewApiError):
         status_code = exc.status_code
         if exc.kind == "config":
-            message = str(exc)
             error_kind = "config"
         elif exc.kind == "2fa":
-            message = "New API 账号启用了 2FA，请改用管理员访问令牌。"
             error_kind = "2fa"
         elif status_code == 401:
-            message = "New API 身份验证失败，请检查访问令牌或账号密码。"
             error_kind = "unauthorized"
         elif status_code == 403:
-            message = "New API 管理权限不足，请使用管理员或超管凭据。"
             error_kind = "forbidden"
         elif status_code == 404:
-            message = "New API 接口不兼容，或站点地址填写错误。"
             error_kind = "not_found"
         else:
-            message = "New API 连接或管理权限验证失败。"
             error_kind = "connection"
+        message = f"New API 测试失败：{public_newapi_error(exc)}"
         return error_response(
             message,
             data={
@@ -457,6 +469,9 @@ class CampaignPageApi:
                     self._settings_state.revision = current_revision
                 normalized = {
                     "newapi_base_url": str(values.get("newapi_base_url", "")).strip(),
+                    "newapi_user_id": self._optional_newapi_user_id(
+                        values.get("newapi_user_id", "")
+                    ),
                     "newapi_timeout_seconds": self._positive_int(
                         values.get("newapi_timeout_seconds", 10),
                         "New API 超时秒数",

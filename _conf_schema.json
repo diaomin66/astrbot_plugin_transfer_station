@@ -96,6 +96,13 @@
     "hint": "优先使用具备管理员或超管权限的访问令牌；请勿填写普通用户 API Key。",
     "obvious_hint": true
   },
+  "newapi_user_id": {
+    "description": "New API 超管用户数字 ID（旧版兼容）",
+    "type": "string",
+    "default": "",
+    "hint": "New API v0.13.x 等旧版本使用系统访问令牌时需要同时填写；新版可留空。用户名密码登录会自动识别。",
+    "obvious_hint": true
+  },
   "newapi_username": {
     "description": "New API 管理员用户名",
     "type": "string",
@@ -189,10 +196,10 @@
     "hint": "可用占位符：{display_type}、{role}、{username}、{version}。"
   },
   "newapi_error_content": {
-    "description": "机器人回复文案：New API 服务暂不可用，请稍后再试或联系管理员。",
+    "description": "机器人回复文案：New API 操作失败。",
     "type": "string",
-    "default": "New API 服务暂不可用，请稍后再试或联系管理员。",
-    "hint": "New API 配置或连接不可用时发送，不回显上游原始错误。"
+    "default": "New API 操作失败：{error}",
+    "hint": "支持 {error} 占位符；仅显示经过脱敏和分类的原因，不回显令牌或完整上游响应。"
   },
   "newapi_user_error_content": {
     "description": "机器人回复文案：New API 用户校验失败，请确认用户 ID 正确且账号已启用。",

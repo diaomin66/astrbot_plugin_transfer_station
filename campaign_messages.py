@@ -10,7 +10,7 @@ CAMPAIGN_TEXT_DEFAULTS = {
         "New API 连接测试成功。\n"
         "版本：{version}\n账号：{username}\n角色：{role}\n额度显示：{display_type}"
     ),
-    "newapi_error": "New API 服务暂不可用，请稍后再试或联系管理员。",
+    "newapi_error": "New API 操作失败：{error}",
     "newapi_user_error": "New API 用户校验失败，请确认用户 ID 正确且账号已启用。",
     "lottery_help": (
         "抽奖管理指令：\n"

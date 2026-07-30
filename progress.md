@@ -386,3 +386,57 @@
 - `progress.md`：仅在文件末尾追加本轮最终实施与验证记录。
 - 本轮未修改、删除或暂存工作区现有 Adobe2API、压缩包、Compose、HAProxy 和取证目录。
 - 回滚方式：先停止 AstrBot，备份 `gifts.db`、`lottery.db`、`compensation.db` 及对应 `-wal`/`-shm` 文件；发布后执行 `git revert <本轮提交哈希>`，再重启 AstrBot。
+## 2026-07-30 - Task: 修复 New API 连接认证兼容与 `{error}` 原样显示
+
+### What was done
+
+- 将 New API 连接失败处理从“吞掉具体异常”改为返回经过分类和脱敏的 `{error}` 原因，修复自定义文案 `New API 操作失败：{error}` 原样显示的问题。
+- 增加 New API 旧版本兼容：可选配置超管用户数字 ID并发送 `New-Api-User` 请求头；用户名密码登录会从旧版登录响应自动提取用户 ID；新版无该要求时仍可留空。
+- 保留系统访问令牌优先策略，明确普通模型 API Key 不用于用户管理和原子加额；增加 401、403、404、2FA、网络、版本不兼容和上游未提供原因的可操作提示，禁止回显令牌和完整上游响应。
+- 调度台设置新增“超管用户数字 ID（旧版兼容）”字段，配置校验限制为安全范围内的正整数；版本升级为 `v1.4.1`。
+- 根据 QuantumNous New API 官方源码核对：当前版本使用 Bearer 系统访问令牌，旧版 `v0.13.2` 的管理鉴权额外要求 `New-Api-User`，`/api/user/manage` 使用 `add_quota` + `mode=add` 原子增加额度。
+
+### Testing
+
+- `python -m pytest -q`：`126 passed`；仅 AstrBot 依赖产生已知 `audioop` 弃用警告。
+- `npm test`：`11 passed`。
+- `ruff check`：通过；`ruff format --check`：`19 files already formatted`。
+- Python 编译、两个 Page JavaScript 语法检查、JSON/YAML/UTF-8 解析和 `git diff --check`：通过。
+- `npm audit --audit-level=high`：`0 vulnerabilities`。
+- 新增回归覆盖：Bearer/旧版用户 ID 头、密码登录自动提取 ID、登录单飞、错误脱敏、错误占位符、Page 配置校验和活动发布失败诊断。
+
+### Notes
+
+- `newapi_client.py`：新增旧版认证头、登录用户 ID提取、会话生命周期和安全错误分类。
+- `main.py`：为所有直接 New API 错误路径补充 `{error}` 占位符并升级插件版本。
+- `lottery.py`：为抽奖创建/发布/用户查询失败返回安全错误原因。
+- `compensation.py`：为补偿创建/用户查询失败返回安全错误原因。
+- `campaign_page_api.py`：新增旧版用户 ID配置、Page 校验及可操作连接错误提示。
+- `_conf_schema.json`：新增 `newapi_user_id`，更新 `newapi_error_content` 默认文案和占位符说明。
+- `campaign_messages.py`：将 New API 默认错误文案改为 `New API 操作失败：{error}`。
+- `pages/campaigns/index.html`：新增旧版超管用户数字 ID输入框。
+- `pages/campaigns/app.js`：同步读取、保存和显示旧版用户 ID配置。
+- `metadata.yaml`：版本升级为 `v1.4.1`。
+- `README.md`、`docs/CAMPAIGNS.md`、`docs/USAGE.md`：补充令牌类型、旧版认证、错误诊断和升级说明。
+- `tests/test_newapi_client.py`：新增 Bearer/旧版头、密码登录 ID提取和错误脱敏测试。
+- `tests/test_plugin.py`：新增 `{error}` 不泄漏回归测试。
+- `tests/test_campaign_page_api.py`：新增旧版 ID设置读取、保存和非法参数测试。
+- `tests/test_campaign_storage.py`：新增抽奖发布失败的安全错误占位符测试。
+- `tests/test_static_contract.py`、`tests/js/campaign_page_behavior.test.mjs`：更新 v1.4.1 与 Page 设置契约。
+- 本轮未修改、删除或提交 Adobe2API、归档包、Compose、HAProxy 和取证目录。
+- 回滚方式：停止 AstrBot，备份数据库及 WAL/SHM 文件，执行 `git revert <本轮提交哈希>`，再重启 AstrBot。
+## 2026-07-30 - Task: 补充 `/newapi 测试` 错误诊断回归
+
+### What was done
+
+- 增加真实插件命令入口回归，确认旧版 `New-Api-User` 缺失时会提示用户数字 ID要求，且不会再显示 `{error}` 原样占位符。
+
+### Testing
+
+- 全量 Python 测试：`127 passed`。
+- Page JavaScript 测试：`11 passed`；Ruff、格式、语法和差异检查继续通过。
+
+### Notes
+
+- `tests/test_plugin.py`：新增 `/newapi 测试` 入口的旧版认证失败提示回归。
+- 回滚方式：随本轮提交一起执行 `git revert <本轮提交哈希>`；提交前后均不触碰 Adobe2API 无关文件。

@@ -157,6 +157,7 @@ def make_api(tmp_path, config=None, context=None):
         {
             "newapi_base_url": "https://newapi.example.com",
             "newapi_access_token": "secret-token",
+            "newapi_user_id": "7",
             "newapi_username": "root",
             "newapi_password": "secret-password",
             "newapi_timeout_seconds": 10,
@@ -203,6 +204,7 @@ def make_api(tmp_path, config=None, context=None):
 def editable_settings(base_url: str) -> dict:
     return {
         "newapi_base_url": base_url,
+        "newapi_user_id": "7",
         "newapi_timeout_seconds": 10,
         "newapi_verify_ssl": True,
         "newapi_allow_insecure_http": False,
@@ -256,6 +258,7 @@ async def test_campaign_page_routes_settings_and_secret_redaction(tmp_path):
     settings = response_json(await api.get_settings())
     assert settings["newapi_access_token_configured"] is True
     assert settings["newapi_password_configured"] is True
+    assert settings["newapi_user_id"] == "7"
     assert "newapi_access_token" not in settings
     assert "newapi_password" not in settings
     revision = settings["revision"]
@@ -270,6 +273,7 @@ async def test_campaign_page_routes_settings_and_secret_redaction(tmp_path):
             "revision": revision,
             "settings": {
                 "newapi_base_url": "https://new.example.com",
+                "newapi_user_id": "8",
                 "newapi_timeout_seconds": 15,
                 "newapi_verify_ssl": True,
                 "newapi_allow_insecure_http": False,
@@ -282,6 +286,8 @@ async def test_campaign_page_routes_settings_and_secret_redaction(tmp_path):
     ):
         saved = response_json(await api.save_settings())
     assert saved["settings"]["newapi_base_url"] == "https://new.example.com"
+    assert saved["settings"]["newapi_user_id"] == "8"
+    assert config["newapi_user_id"] == "8"
     assert config["lottery_enabled_group_ids"] == ["100"]
     assert config.save_count == 1
     assert _rest[-2] == [True]
@@ -702,15 +708,15 @@ async def test_settings_save_does_not_report_success_when_astrbot_refuses(tmp_pa
         ),
         (
             newapi_module.NewApiError("secret upstream", status_code=401),
-            "身份验证失败",
+            "认证失败",
         ),
         (
             newapi_module.NewApiError("secret upstream", status_code=403),
-            "管理权限不足",
+            "权限不足",
         ),
         (
             newapi_module.NewApiError("secret upstream", status_code=404),
-            "接口不兼容",
+            "接口不存在",
         ),
     ],
 )
@@ -728,6 +734,27 @@ async def test_newapi_page_test_returns_safe_error_categories(tmp_path, error, m
     assert response.status_code == 400
     assert message in body
     assert "secret upstream" not in body
+
+
+@pytest.mark.asyncio
+async def test_settings_reject_invalid_legacy_newapi_user_id(tmp_path):
+    api, _context, config, *_ = make_api(tmp_path)
+    current = response_json(await api.get_settings())
+    values = editable_settings("https://newapi.example.com")
+    values["newapi_user_id"] = "7.5"
+
+    with request_context(
+        "POST",
+        "/campaigns/settings/save",
+        payload={
+            "revision": current["revision"],
+            "settings": values,
+        },
+    ):
+        response = await api.save_settings()
+
+    assert response.status_code == 400
+    assert config["newapi_user_id"] == "7"
 
 
 @pytest.mark.asyncio

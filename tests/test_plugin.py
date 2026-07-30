@@ -188,6 +188,51 @@ def test_all_bot_messages_are_configurable(tmp_path, monkeypatch):
     assert plugin._outcome_content("unexpected") == "未知失败"
 
 
+def test_newapi_error_placeholder_never_leaks_literal_marker(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {"newapi_error_content": "New API 操作失败：{error}"},
+    )
+
+    content = plugin._campaign_content(campaign_utils.ActionResult("newapi_error"))
+
+    assert content == "New API 操作失败：连接或配置不可用"
+    assert "{error}" not in content
+
+
+@pytest.mark.asyncio
+async def test_newapi_test_command_reports_legacy_auth_requirement(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {"newapi_error_content": "New API 操作失败：{error}"},
+    )
+
+    class LegacyFailure:
+        async def test_connection(self):
+            raise newapi_module.NewApiError(
+                "New-Api-User header is required",
+                status_code=200,
+            )
+
+    plugin._newapi_client = LegacyFailure()
+    event = FakeEvent()
+
+    await plugin.newapi_test(event)
+
+    assert event.stopped is True
+    assert len(event.sent) == 1
+    assert "用户数字 ID" in event.sent[0]
+    assert "{error}" not in event.sent[0]
+
+
 def test_custom_gift_message_without_placeholder_still_includes_code(
     tmp_path,
     monkeypatch,

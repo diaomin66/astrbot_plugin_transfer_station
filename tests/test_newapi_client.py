@@ -18,6 +18,7 @@ def config(**overrides):
     result = {
         "newapi_base_url": "https://newapi.example",
         "newapi_access_token": "admin-token",
+        "newapi_user_id": "",
         "newapi_timeout_seconds": 10,
         "newapi_verify_ssl": True,
         "newapi_allow_insecure_http": False,
@@ -127,6 +128,27 @@ async def test_token_auth_user_lookup_and_atomic_add_quota():
 
 
 @pytest.mark.asyncio
+async def test_management_access_token_can_send_legacy_user_header():
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        assert request.headers["authorization"] == "Bearer admin-token"
+        assert request.headers["new-api-user"] == "7"
+        return response({"id": 123, "username": "alice", "status": 1})
+
+    client = NewApiClient(
+        config(newapi_user_id="7"),
+        client=async_client(handler),
+    )
+
+    await client.get_user(123)
+
+    assert len(requests) == 1
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_password_credentials_are_snapshotted_at_client_creation():
     original = config(
         newapi_base_url="https://old.example",
@@ -140,7 +162,8 @@ async def test_password_credentials_are_snapshotted_at_client_creation():
         requests.append(request)
         if request.url.path == "/api/user/login":
             return response({"access_token": "session-token"})
-        return response({"id": 9, "username": "bob", "status": 1})
+        user_id = int(request.url.path.rsplit("/", 1)[-1])
+        return response({"id": user_id, "username": f"user-{user_id}", "status": 1})
 
     client = NewApiClient(
         original,
@@ -233,6 +256,68 @@ async def test_password_login_uses_returned_access_token():
         "/api/user/9",
     ]
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_password_login_derives_legacy_user_header():
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        if request.url.path == "/api/user/login":
+            return response(
+                {
+                    "id": 7,
+                    "username": "root",
+                    "role": 10,
+                    "status": 1,
+                }
+            )
+        assert "authorization" not in request.headers
+        assert request.headers["new-api-user"] == "7"
+        user_id = int(request.url.path.rsplit("/", 1)[-1])
+        return response({"id": user_id, "username": f"user-{user_id}", "status": 1})
+
+    client = NewApiClient(
+        config(
+            newapi_access_token="",
+            newapi_username="root",
+            newapi_password="password",
+        ),
+        client=async_client(handler),
+    )
+
+    first = await client.get_user(9)
+    second = await client.get_user(10)
+
+    assert first.username == "user-9"
+    assert second.username == "user-10"
+    assert [request.url.path for request in requests] == [
+        "/api/user/login",
+        "/api/user/9",
+        "/api/user/10",
+    ]
+    await client.close()
+
+
+def test_public_error_message_is_actionable_and_redacts_credentials():
+    unauthorized = module.public_newapi_error(
+        NewApiError(
+            "Bearer secret-admin-token was rejected",
+            status_code=401,
+        )
+    )
+    legacy = module.public_newapi_error(
+        NewApiError(
+            "New-Api-User header is required",
+            status_code=200,
+        )
+    )
+
+    assert "系统访问令牌" in unauthorized
+    assert "用户数字 ID" in unauthorized
+    assert "secret-admin-token" not in unauthorized
+    assert "用户数字 ID" in legacy
 
 
 @pytest.mark.asyncio

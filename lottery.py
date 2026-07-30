@@ -32,7 +32,13 @@ from .campaign_utils import (
     utc_now,
     validate_text,
 )
-from .newapi_client import NewApiClient, NewApiError, NewApiUser, QuotaSnapshot
+from .newapi_client import (
+    NewApiClient,
+    NewApiError,
+    NewApiUser,
+    QuotaSnapshot,
+    public_newapi_error,
+)
 from .sqlite_utils import open_sqlite
 
 LOTTERY_SCHEMA_VERSION = 4
@@ -2248,7 +2254,10 @@ class LotteryService:
     ) -> ActionResult:
         current = now or utc_now()
         if self.newapi is None:
-            return ActionResult("newapi_error")
+            return ActionResult(
+                "newapi_error",
+                {"error": public_newapi_error()},
+            )
         activity = await self.storage.get_active(group_id)
         if (
             activity
@@ -2266,8 +2275,11 @@ class LotteryService:
                 expected_activity_id=expected_activity_id,
                 expected_revision=expected_revision,
             )
-        except NewApiError:
-            return ActionResult("newapi_error")
+        except NewApiError as exc:
+            return ActionResult(
+                "newapi_error",
+                {"error": public_newapi_error(exc)},
+            )
         except ValueError as exc:
             mapping = {
                 "no_draft": "lottery_no_draft",
@@ -2447,7 +2459,10 @@ class LotteryService:
         now: datetime | None = None,
     ) -> ActionResult:
         if self.newapi is None:
-            return ActionResult("newapi_error")
+            return ActionResult(
+                "newapi_error",
+                {"error": public_newapi_error()},
+            )
         current = now or utc_now()
         local_state = await self.storage.submission_state(
             group_id,
@@ -2481,8 +2496,11 @@ class LotteryService:
                 user,
                 now=current,
             )
-        except NewApiError:
-            return ActionResult("newapi_user_error")
+        except NewApiError as exc:
+            return ActionResult(
+                "newapi_user_error",
+                {"error": public_newapi_error(exc)},
+            )
         except ValueError as exc:
             mapping = {
                 "no_claiming": "lottery_not_open",
@@ -2518,7 +2536,10 @@ class LotteryService:
         now: datetime | None = None,
     ) -> ActionResult:
         if self.newapi is None:
-            return ActionResult("newapi_error")
+            return ActionResult(
+                "newapi_error",
+                {"error": public_newapi_error()},
+            )
         current = now or utc_now()
         try:
             payout = await self.storage.reserve_confirmation(

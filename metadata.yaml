@@ -1,7 +1,7 @@
 name: astrbot_plugin_transfer_station
 display_name: 中转站机器人
 desc: QQ 新人礼、New API 中转抽奖与补偿机器人，支持永久防重、定时开奖和原子增加额度。
-version: v1.4.0
+version: v1.4.1
 author: diaomin66
 repo: https://github.com/diaomin66/astrbot_plugin_transfer_station
 entry: main.py

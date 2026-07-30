@@ -25,7 +25,13 @@ from .campaign_utils import (
     utc_now,
     validate_text,
 )
-from .newapi_client import NewApiClient, NewApiError, NewApiUser, QuotaSnapshot
+from .newapi_client import (
+    NewApiClient,
+    NewApiError,
+    NewApiUser,
+    QuotaSnapshot,
+    public_newapi_error,
+)
 from .sqlite_utils import open_sqlite
 
 COMPENSATION_SCHEMA_VERSION = 3
@@ -1365,7 +1371,10 @@ class CompensationService:
         except ValueError:
             return ActionResult("comp_invalid_argument")
         if self.newapi is None:
-            return ActionResult("newapi_error")
+            return ActionResult(
+                "newapi_error",
+                {"error": public_newapi_error()},
+            )
         try:
             snapshot = await self.newapi.status_snapshot()
             activity = await self.storage.open_activity(
@@ -1378,8 +1387,11 @@ class CompensationService:
                 snapshot,
                 now=utc_now(),
             )
-        except NewApiError:
-            return ActionResult("newapi_error")
+        except NewApiError as exc:
+            return ActionResult(
+                "newapi_error",
+                {"error": public_newapi_error(exc)},
+            )
         except ValueError as exc:
             key = (
                 "comp_active_exists"
@@ -1468,7 +1480,10 @@ class CompensationService:
         api_user_id: str,
     ) -> ActionResult:
         if self.newapi is None:
-            return ActionResult("newapi_error")
+            return ActionResult(
+                "newapi_error",
+                {"error": public_newapi_error()},
+            )
         current = utc_now()
         local_state = await self.storage.submission_state(
             group_id,
@@ -1496,8 +1511,11 @@ class CompensationService:
                 user,
                 now=current,
             )
-        except NewApiError:
-            return ActionResult("newapi_user_error")
+        except NewApiError as exc:
+            return ActionResult(
+                "newapi_user_error",
+                {"error": public_newapi_error(exc)},
+            )
         except ValueError as exc:
             mapping = {
                 "no_active": "comp_no_active",
@@ -1520,7 +1538,10 @@ class CompensationService:
 
     async def confirm(self, group_id: str, qq_id: str) -> ActionResult:
         if self.newapi is None:
-            return ActionResult("newapi_error")
+            return ActionResult(
+                "newapi_error",
+                {"error": public_newapi_error()},
+            )
         try:
             claim = await self.storage.reserve(group_id, qq_id, now=utc_now())
         except ValueError as exc:

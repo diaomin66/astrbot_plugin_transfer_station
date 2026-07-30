@@ -27,12 +27,12 @@ from .campaign_utils import (
 )
 from .compensation import CompensationService, CompensationStorage
 from .lottery import LotteryService, LotteryStorage
-from .newapi_client import NewApiClient, NewApiError
+from .newapi_client import NewApiClient, NewApiError, public_newapi_error
 from .page_api import GiftPageApi
 from .storage import ClaimOutcome, GiftStorage
 
 PLUGIN_NAME = "astrbot_plugin_transfer_station"
-PLUGIN_VERSION = "1.4.0"
+PLUGIN_VERSION = "1.4.1"
 REPOSITORY = "https://github.com/diaomin66/astrbot_plugin_transfer_station"
 BASELINE_ACTION_TIMEOUT_SECONDS = 20
 BASELINE_RETRY_SECONDS = 60
@@ -152,7 +152,15 @@ class TransferStationPlugin(Star):
         )
         for name, value in result.placeholders.items():
             content = content.replace(f"{{{name}}}", str(value))
+        content = content.replace("{error}", public_newapi_error())
         return content
+
+    @staticmethod
+    def _newapi_error_action(exc: NewApiError | None = None) -> ActionResult:
+        return ActionResult(
+            "newapi_error",
+            {"error": public_newapi_error(exc)},
+        )
 
     def _newapi(self) -> NewApiClient:
         if self._terminating:
@@ -823,8 +831,8 @@ class TransferStationPlugin(Star):
                     "display_type": result.display_type,
                 },
             )
-        except NewApiError:
-            action = ActionResult("newapi_error")
+        except NewApiError as exc:
+            action = self._newapi_error_action(exc)
         await event.send(event.plain_result(self._campaign_content(action)))
 
     @filter.command_group("抽奖")
@@ -986,10 +994,10 @@ class TransferStationPlugin(Star):
             return
         try:
             service = self._lottery_service(require_newapi=True)
-        except NewApiError:
+        except NewApiError as exc:
             await self._send_action(
                 event,
-                ActionResult("newapi_error"),
+                self._newapi_error_action(exc),
             )
             return
         if not activity or activity["status"] != "draft":
@@ -1130,10 +1138,10 @@ class TransferStationPlugin(Star):
         except ValueError:
             await self._send_action(event, ActionResult("comp_invalid_argument"))
             return
-        except NewApiError:
+        except NewApiError as exc:
             await self._send_action(
                 event,
-                ActionResult("newapi_error"),
+                self._newapi_error_action(exc),
             )
             return
         result = await service.open(
@@ -1236,8 +1244,8 @@ class TransferStationPlugin(Star):
                             )
                         finally:
                             self._user_lookup_semaphore.release()
-                except NewApiError:
-                    result = ActionResult("newapi_error")
+                except NewApiError as exc:
+                    result = self._newapi_error_action(exc)
                 await self._send_action(event, result)
                 return True
             if text == "确认 抽奖":
@@ -1247,8 +1255,8 @@ class TransferStationPlugin(Star):
                     try:
                         service = self._lottery_service(require_newapi=True)
                         result = await service.confirm(group_id, user_id)
-                    except NewApiError:
-                        result = ActionResult("newapi_error")
+                    except NewApiError as exc:
+                        result = self._newapi_error_action(exc)
                     finally:
                         self._campaign_write_semaphore.release()
                 await self._send_action(event, result)
@@ -1291,8 +1299,8 @@ class TransferStationPlugin(Star):
                             )
                         finally:
                             self._user_lookup_semaphore.release()
-                except NewApiError:
-                    result = ActionResult("newapi_error")
+                except NewApiError as exc:
+                    result = self._newapi_error_action(exc)
                 await self._send_action(event, result)
                 return True
             if text == "确认 补偿":
@@ -1302,8 +1310,8 @@ class TransferStationPlugin(Star):
                     try:
                         service = self._compensation_service(require_newapi=True)
                         result = await service.confirm(group_id, user_id)
-                    except NewApiError:
-                        result = ActionResult("newapi_error")
+                    except NewApiError as exc:
+                        result = self._newapi_error_action(exc)
                     finally:
                         self._campaign_write_semaphore.release()
                 await self._send_action(event, result)
