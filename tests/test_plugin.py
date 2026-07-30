@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 from conftest import load_plugin_module
 
 main = load_plugin_module("main")
+campaign_utils = load_plugin_module("campaign_utils")
+newapi_module = load_plugin_module("newapi_client")
 Comp = main.Comp
 TransferStationPlugin = main.TransferStationPlugin
 
@@ -66,6 +70,7 @@ class FakeEvent:
         sender_id="200",
         self_id="999",
         messages=None,
+        message_str="",
         bot=None,
     ):
         self.message_obj = SimpleNamespace(raw_message=raw)
@@ -73,6 +78,7 @@ class FakeEvent:
         self._sender_id = sender_id
         self._self_id = self_id
         self._messages = messages or []
+        self._message_str = message_str
         self.bot = bot or FakeBot()
         self.sent = []
         self.stopped = False
@@ -88,6 +94,9 @@ class FakeEvent:
 
     def get_messages(self):
         return self._messages
+
+    def get_message_str(self):
+        return self._message_str
 
     def chain_result(self, chain):
         return chain
@@ -108,6 +117,28 @@ def plugin(tmp_path, monkeypatch):
     return TransferStationPlugin(FakeContext(), {})
 
 
+class FakeNewApi:
+    def __init__(self):
+        self.added = []
+
+    async def status_snapshot(self):
+        return newapi_module.QuotaSnapshot(
+            "USD",
+            Decimal(500000),
+            Decimal("7.2"),
+            Decimal(1),
+        )
+
+    async def get_user(self, user_id):
+        return newapi_module.NewApiUser(int(user_id), f"user-{user_id}", 1)
+
+    async def add_quota(self, user_id, raw_quota):
+        self.added.append((int(user_id), int(raw_quota)))
+
+    async def close(self):
+        return None
+
+
 def test_config_and_exact_claim_matching(plugin):
     valid = FakeEvent(messages=[Comp.At(qq="999"), Comp.Plain(" 领取新人礼 ")])
     extra_text = FakeEvent(messages=[Comp.At(qq="999"), Comp.Plain("领取新人礼 谢谢")])
@@ -122,6 +153,9 @@ def test_config_and_exact_claim_matching(plugin):
     assert plugin._is_claim_message(image) is False
     assert plugin._welcome_content().endswith("“领取新人礼”即可领取新人礼。")
     assert plugin._group_enabled("100") is True
+    assert plugin._reserved_lottery_keyword("领取新人礼") is True
+    assert plugin._reserved_lottery_keyword("确认 补偿") is True
+    assert plugin._reserved_lottery_keyword("参与抽奖") is False
 
 
 def test_all_bot_messages_are_configurable(tmp_path, monkeypatch):
@@ -388,3 +422,163 @@ async def test_claim_is_blocked_until_group_baseline_succeeds(plugin):
     assert "成员基线" in event.sent[0]
     assert not any(action == "send_private_msg" for action, _ in event.bot.calls)
     assert (await plugin.storage.summary())["available_codes"] == 1
+
+
+@pytest.mark.asyncio
+async def test_lottery_user_registration_and_payout_flow(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {"lottery_enabled": True},
+    )
+    fake_newapi = FakeNewApi()
+    plugin._newapi_client = fake_newapi
+    await plugin.lottery_storage.initialize()
+    service = plugin._lottery_service(require_newapi=True)
+    now = campaign_utils.utc_now()
+    activity = await plugin.lottery_storage.create_draft(
+        "100", "测试抽奖", "1", now=now
+    )
+    await plugin.lottery_storage.add_prize("100", "一等奖", 1, "10")
+    await plugin.lottery_storage.publish(
+        "100",
+        await fake_newapi.status_snapshot(),
+        now=now,
+    )
+
+    join_event = FakeEvent(
+        messages=[Comp.At(qq="999"), Comp.Plain("参与抽奖")],
+    )
+    await plugin.handle_aiocqhttp_event(join_event)
+    assert join_event.stopped is True
+    assert "报名成功" in join_event.sent[0]
+
+    await service.draw(
+        activity
+        | {
+            "display_type": "USD",
+            "quota_per_unit": "500000",
+            "usd_exchange_rate": "7.2",
+            "custom_currency_exchange_rate": "1",
+            "custom_currency_symbol": "",
+        },
+        ["200"],
+        now=now,
+    )
+    target_event = FakeEvent(
+        messages=[Comp.At(qq="999"), Comp.Plain("抽奖 7")],
+    )
+    await plugin.handle_aiocqhttp_event(target_event)
+    assert "用户名：user-7" in target_event.sent[0]
+
+    confirm_event = FakeEvent(
+        messages=[Comp.At(qq="999"), Comp.Plain("确认 抽奖")],
+    )
+    await plugin.handle_aiocqhttp_event(confirm_event)
+    assert "发放成功" in confirm_event.sent[0]
+    assert fake_newapi.added == [(7, 5000000)]
+
+
+@pytest.mark.asyncio
+async def test_compensation_flow_and_exact_budget_close(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {"compensation_enabled": True},
+    )
+    fake_newapi = FakeNewApi()
+    plugin._newapi_client = fake_newapi
+    await plugin.compensation_storage.initialize()
+    service = plugin._compensation_service(require_newapi=True)
+    opened = await service.open(
+        "100",
+        "10",
+        None,
+        "10",
+        "测试补偿",
+        "1",
+    )
+    assert opened.key == "comp_opened"
+
+    target_event = FakeEvent(
+        messages=[Comp.At(qq="999"), Comp.Plain("补偿 8")],
+    )
+    await plugin.handle_aiocqhttp_event(target_event)
+    assert "用户名：user-8" in target_event.sent[0]
+
+    confirm_event = FakeEvent(
+        messages=[Comp.At(qq="999"), Comp.Plain("确认 补偿")],
+    )
+    await plugin.handle_aiocqhttp_event(confirm_event)
+    assert "补偿发放成功" in confirm_event.sent[0]
+    assert fake_newapi.added == [(8, 5000000)]
+    assert await plugin.compensation_storage.get_active("100") is None
+
+
+@pytest.mark.asyncio
+async def test_campaign_systems_work_when_newcomer_gift_is_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    plugin = TransferStationPlugin(
+        FakeContext(),
+        {
+            "enabled": False,
+            "lottery_enabled": True,
+        },
+    )
+    plugin._newapi_client = FakeNewApi()
+    now = campaign_utils.utc_now()
+    await plugin.lottery_storage.create_draft("100", "独立抽奖", "1", now=now)
+    await plugin.lottery_storage.add_prize("100", "奖品", 1, "1")
+    await plugin.lottery_storage.publish(
+        "100",
+        await plugin._newapi_client.status_snapshot(),
+        now=now,
+    )
+    event = FakeEvent(
+        messages=[Comp.At(qq="999"), Comp.Plain("参与抽奖")],
+    )
+
+    await plugin.handle_aiocqhttp_event(event)
+
+    assert "报名成功" in event.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_filters_lottery_participants_who_left_group(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main.StarTools, "get_data_dir", lambda _name: tmp_path)
+    bot = FakeBot(action_results={"get_group_member_list": [{"user_id": 200}]})
+    plugin = TransferStationPlugin(
+        FakeContext(bot),
+        {"lottery_enabled": True},
+    )
+    fake_newapi = FakeNewApi()
+    plugin._newapi_client = fake_newapi
+    await plugin.lottery_storage.initialize()
+    start = campaign_utils.utc_now() - timedelta(hours=2)
+    activity = await plugin.lottery_storage.create_draft(
+        "100", "离群过滤", "1", now=start
+    )
+    await plugin.lottery_storage.add_prize("100", "奖品", 2, "1")
+    await plugin.lottery_storage.publish(
+        "100",
+        await fake_newapi.status_snapshot(),
+        now=start,
+    )
+    await plugin.lottery_storage.register(
+        "100", "200", "参与抽奖", now=start + timedelta(minutes=1)
+    )
+    await plugin.lottery_storage.register(
+        "100", "201", "参与抽奖", now=start + timedelta(minutes=1)
+    )
+
+    await plugin._campaign_scheduler_once()
+
+    winners = await plugin.lottery_storage.winners(int(activity["id"]))
+    assert [winner["user_id"] for winner in winners] == ["200"]
+    assert any(action == "send_group_msg" for action, _ in bot.calls)

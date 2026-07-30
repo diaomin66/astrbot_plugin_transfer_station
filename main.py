@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any
@@ -11,14 +12,27 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.star.filter.platform_adapter_type import PlatformAdapterType
 
+from .campaign_messages import CAMPAIGN_TEXT_DEFAULTS
+from .campaign_utils import (
+    ActionResult,
+    parse_duration,
+    parse_positive_decimal,
+    parse_time_spec,
+    to_iso,
+    utc_now,
+)
+from .compensation import CompensationService, CompensationStorage
+from .lottery import LotteryService, LotteryStorage
+from .newapi_client import NewApiClient, NewApiError
 from .page_api import GiftPageApi
 from .storage import ClaimOutcome, GiftStorage
 
 PLUGIN_NAME = "astrbot_plugin_transfer_station"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.3.0"
 REPOSITORY = "https://github.com/diaomin66/astrbot_plugin_transfer_station"
 BASELINE_ACTION_TIMEOUT_SECONDS = 20
 BASELINE_RETRY_SECONDS = 60
+CAMPAIGN_SCHEDULER_SECONDS = 5
 
 
 class TransferStationPlugin(Star):
@@ -29,10 +43,18 @@ class TransferStationPlugin(Star):
         self.context = context
         self.config = config or {}
         self.storage = GiftStorage(StarTools.get_data_dir(PLUGIN_NAME) / "gifts.db")
+        self.lottery_storage = LotteryStorage(
+            StarTools.get_data_dir(PLUGIN_NAME) / "lottery.db"
+        )
+        self.compensation_storage = CompensationStorage(
+            StarTools.get_data_dir(PLUGIN_NAME) / "compensation.db"
+        )
         self.page_api = GiftPageApi(context, self.storage)
         self.page_api.register_routes()
         self._baseline_lock = asyncio.Lock()
         self._baseline_task: asyncio.Task[None] | None = None
+        self._campaign_task: asyncio.Task[None] | None = None
+        self._newapi_client: NewApiClient | None = None
         self._ready_group_ids: set[str] = set()
 
     def _enabled(self) -> bool:
@@ -47,6 +69,53 @@ class TransferStationPlugin(Star):
         if not isinstance(configured, list):
             return set()
         return {str(item).strip() for item in configured if str(item).strip()}
+
+    def _feature_enabled(self, feature: str) -> bool:
+        return bool(self.config.get(f"{feature}_enabled", False))
+
+    def _feature_group_enabled(self, feature: str, group_id: str) -> bool:
+        configured = self.config.get(f"{feature}_enabled_group_ids", [])
+        enabled_groups = (
+            {str(item).strip() for item in configured if str(item).strip()}
+            if isinstance(configured, list)
+            else set()
+        )
+        return self._feature_enabled(feature) and (
+            not enabled_groups or str(group_id) in enabled_groups
+        )
+
+    def _campaign_content(self, result: ActionResult) -> str:
+        default = CAMPAIGN_TEXT_DEFAULTS.get(
+            result.key,
+            CAMPAIGN_TEXT_DEFAULTS["campaign_invalid_argument"],
+        )
+        content = (
+            str(self.config.get(f"{result.key}_content", default)).strip() or default
+        )
+        for name, value in result.placeholders.items():
+            content = content.replace(f"{{{name}}}", str(value))
+        return content
+
+    def _newapi(self) -> NewApiClient:
+        if self._newapi_client is None:
+            self._newapi_client = NewApiClient(self.config)
+        return self._newapi_client
+
+    def _lottery_service(self, *, require_newapi: bool = False) -> LotteryService:
+        client: NewApiClient | None = None
+        if require_newapi:
+            client = self._newapi()
+        return LotteryService(self.lottery_storage, client)
+
+    def _compensation_service(
+        self,
+        *,
+        require_newapi: bool = False,
+    ) -> CompensationService:
+        client: NewApiClient | None = None
+        if require_newapi:
+            client = self._newapi()
+        return CompensationService(self.compensation_storage, client)
 
     def _claim_phrase(self) -> str:
         phrase = str(self.config.get("claim_phrase", "领取新人礼")).strip()
@@ -130,9 +199,30 @@ class TransferStationPlugin(Star):
         return raw if isinstance(raw, Mapping) else None
 
     def _is_claim_message(self, event: AstrMessageEvent) -> bool:
+        return self._mentioned_plain_text(event) == self._claim_phrase()
+
+    @staticmethod
+    def _normalize_command_text(text: str) -> str:
+        return re.sub(r"\s+", " ", str(text).strip()).lstrip("/")
+
+    def _command_tail(
+        self,
+        event: AstrMessageEvent,
+        group: str,
+        subcommand: str,
+    ) -> str:
+        text = self._normalize_command_text(event.get_message_str())
+        prefix = f"{group} {subcommand}"
+        if text == prefix:
+            return ""
+        if text.startswith(f"{prefix} "):
+            return text[len(prefix) + 1 :].strip()
+        return ""
+
+    def _mentioned_plain_text(self, event: AstrMessageEvent) -> str | None:
         self_id = str(event.get_self_id()).strip()
         if not self_id:
-            return False
+            return None
 
         mentioned_self = False
         text_parts: list[str] = []
@@ -142,12 +232,48 @@ class TransferStationPlugin(Star):
                 continue
             if isinstance(component, Comp.At):
                 if str(component.qq) != self_id:
-                    return False
+                    return None
                 mentioned_self = True
                 continue
-            return False
+            return None
 
-        return mentioned_self and "".join(text_parts).strip() == self._claim_phrase()
+        return "".join(text_parts).strip() if mentioned_self else None
+
+    def _reserved_lottery_keyword(self, keyword: str) -> bool:
+        return (
+            keyword == self._claim_phrase()
+            or keyword in {"确认 抽奖", "取消 抽奖", "确认 补偿", "取消 补偿"}
+            or re.fullmatch(r"(?:抽奖|补偿)\s+\d+", keyword) is not None
+        )
+
+    async def _send_action(
+        self,
+        event: AstrMessageEvent,
+        result: ActionResult,
+    ) -> None:
+        if result.stop:
+            event.stop_event()
+        await self._send_group_text(event, self._campaign_content(result))
+
+    async def _campaign_guard(
+        self,
+        event: AstrMessageEvent,
+        feature: str,
+    ) -> str | None:
+        group_id = str(event.get_group_id()).strip()
+        if not group_id:
+            await self._send_action(
+                event,
+                ActionResult("campaign_group_required"),
+            )
+            return None
+        if not self._feature_group_enabled(feature, group_id):
+            await self._send_action(
+                event,
+                ActionResult("campaign_feature_disabled"),
+            )
+            return None
+        return group_id
 
     async def _send_group_text(self, event: AstrMessageEvent, text: str) -> None:
         await event.send(event.plain_result(text))
@@ -376,29 +502,609 @@ class TransferStationPlugin(Star):
             self._outcome_content(outcome.status),
         )
 
+    @filter.command_group("newapi")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    def newapi_commands(self):
+        """New API 管理指令。"""
+
+    @newapi_commands.command("测试")
+    async def newapi_test(self, event: AstrMessageEvent) -> None:
+        event.stop_event()
+        try:
+            result = await self._newapi().test_connection()
+            action = ActionResult(
+                "newapi_test_success",
+                {
+                    "version": result.version,
+                    "username": result.username,
+                    "role": result.role,
+                    "display_type": result.display_type,
+                },
+            )
+        except NewApiError as exc:
+            action = ActionResult("newapi_error", {"error": str(exc)})
+        await event.send(event.plain_result(self._campaign_content(action)))
+
+    @filter.command_group("抽奖")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    def lottery_commands(self):
+        """抽奖管理指令。"""
+
+    @lottery_commands.command("帮助")
+    async def lottery_help(self, event: AstrMessageEvent) -> None:
+        if await self._campaign_guard(event, "lottery"):
+            await self._send_action(event, ActionResult("lottery_help"))
+
+    @lottery_commands.command("创建")
+    async def lottery_create(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        title = self._command_tail(event, "抽奖", "创建")
+        result = await self._lottery_service().create(
+            group_id,
+            title,
+            str(event.get_sender_id()),
+        )
+        await self._send_action(event, result)
+
+    @lottery_commands.command("时间")
+    async def lottery_time(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        parts = self._command_tail(event, "抽奖", "时间").split()
+        if len(parts) != 2:
+            await self._send_action(event, ActionResult("lottery_invalid_argument"))
+            return
+        try:
+            now = utc_now()
+            start_at = parse_time_spec(parts[0], now=now)
+            draw_at = parse_time_spec(parts[1], now=now)
+            if draw_at <= start_at:
+                raise ValueError("draw before start")
+        except ValueError:
+            await self._send_action(event, ActionResult("lottery_invalid_time"))
+            return
+        result = await self._lottery_service().update_draft(
+            group_id,
+            start_at=to_iso(start_at),
+            draw_at=to_iso(draw_at),
+        )
+        await self._send_action(event, result)
+
+    @lottery_commands.command("口令")
+    async def lottery_keyword(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        keyword = self._command_tail(event, "抽奖", "口令").strip()
+        if not keyword:
+            await self._send_action(event, ActionResult("lottery_invalid_argument"))
+            return
+        if self._reserved_lottery_keyword(keyword):
+            await self._send_action(event, ActionResult("lottery_keyword_reserved"))
+            return
+        await self._send_action(
+            event,
+            await self._lottery_service().update_draft(
+                group_id,
+                keyword=keyword,
+            ),
+        )
+
+    @lottery_commands.command("描述")
+    async def lottery_description(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        description = self._command_tail(event, "抽奖", "描述").strip()
+        if not description:
+            await self._send_action(event, ActionResult("lottery_invalid_argument"))
+            return
+        await self._send_action(
+            event,
+            await self._lottery_service().update_draft(
+                group_id,
+                description=description,
+            ),
+        )
+
+    @lottery_commands.command("奖项添加")
+    async def lottery_prize_add(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        parts = self._command_tail(event, "抽奖", "奖项添加").split()
+        if len(parts) < 3:
+            await self._send_action(event, ActionResult("lottery_invalid_argument"))
+            return
+        try:
+            winner_count = int(parts[-2])
+            amount = parse_positive_decimal(parts[-1])
+        except (ValueError, TypeError):
+            await self._send_action(event, ActionResult("lottery_invalid_argument"))
+            return
+        result = await self._lottery_service().add_prize(
+            group_id,
+            " ".join(parts[:-2]),
+            winner_count,
+            amount,
+        )
+        await self._send_action(event, result)
+
+    @lottery_commands.command("奖项删除")
+    async def lottery_prize_delete(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        try:
+            position = int(self._command_tail(event, "抽奖", "奖项删除"))
+        except ValueError:
+            await self._send_action(event, ActionResult("lottery_invalid_argument"))
+            return
+        await self._send_action(
+            event,
+            await self._lottery_service().delete_prize(group_id, position),
+        )
+
+    @lottery_commands.command("领奖时限")
+    async def lottery_claim_duration(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        try:
+            duration = parse_duration(self._command_tail(event, "抽奖", "领奖时限"))
+        except ValueError:
+            await self._send_action(event, ActionResult("lottery_invalid_argument"))
+            return
+        await self._send_action(
+            event,
+            await self._lottery_service().update_draft(
+                group_id,
+                claim_duration_seconds=int(duration.total_seconds()),
+            ),
+        )
+
+    @lottery_commands.command("发布")
+    async def lottery_publish(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        try:
+            service = self._lottery_service(require_newapi=True)
+        except NewApiError as exc:
+            await self._send_action(
+                event,
+                ActionResult("newapi_error", {"error": str(exc)}),
+            )
+            return
+        await self._send_action(event, await service.publish(group_id))
+
+    @lottery_commands.command("状态")
+    async def lottery_status(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if group_id:
+            await self._send_action(
+                event,
+                await self._lottery_service().status(group_id),
+            )
+
+    @lottery_commands.command("参与者")
+    async def lottery_participants(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        raw_page = self._command_tail(event, "抽奖", "参与者")
+        try:
+            page = int(raw_page) if raw_page else 1
+            if page <= 0:
+                raise ValueError
+        except ValueError:
+            await self._send_action(event, ActionResult("lottery_invalid_argument"))
+            return
+        await self._send_action(
+            event,
+            await self._lottery_service().participants(group_id, page),
+        )
+
+    @lottery_commands.command("提前开奖")
+    async def lottery_draw_early(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        activity = await self.lottery_storage.get_active(group_id)
+        if not activity or activity["status"] not in {"scheduled", "open"}:
+            await self._send_action(event, ActionResult("lottery_not_open"))
+            return
+        try:
+            members = await self._call_action_list(
+                event.bot,
+                "get_group_member_list",
+                group_id=int(group_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - OneBot boundary
+            logger.warning(
+                "Lottery member list failed group=%s error_type=%s",
+                group_id,
+                type(exc).__name__,
+            )
+            await self._send_action(
+                event,
+                ActionResult("lottery_member_list_failed"),
+            )
+            return
+        member_ids = [
+            str(member.get("user_id", "")).strip()
+            for member in members
+            if str(member.get("user_id", "")).strip()
+        ]
+        result = await self._lottery_service().draw(activity, member_ids)
+        await self._send_action(event, result)
+
+    @lottery_commands.command("取消")
+    async def lottery_cancel(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if group_id:
+            await self._send_action(
+                event,
+                await self._lottery_service().cancel_activity(
+                    group_id,
+                    self._command_tail(event, "抽奖", "取消"),
+                ),
+            )
+
+    @lottery_commands.command("核查")
+    async def lottery_review(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        parts = self._command_tail(event, "抽奖", "核查").split()
+        if len(parts) != 2 or parts[1] not in {"成功", "失败"}:
+            await self._send_action(event, ActionResult("lottery_invalid_argument"))
+            return
+        await self._send_action(
+            event,
+            await self._lottery_service().review(
+                group_id,
+                parts[0],
+                parts[1] == "成功",
+            ),
+        )
+
+    @filter.command_group("补偿")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    def compensation_commands(self):
+        """补偿管理指令。"""
+
+    @compensation_commands.command("帮助")
+    async def compensation_help(self, event: AstrMessageEvent) -> None:
+        if await self._campaign_guard(event, "compensation"):
+            await self._send_action(event, ActionResult("comp_help"))
+
+    @compensation_commands.command("开启")
+    async def compensation_open(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "compensation")
+        if not group_id:
+            return
+        parts = self._command_tail(event, "补偿", "开启").split()
+        if len(parts) < 3:
+            await self._send_action(event, ActionResult("comp_invalid_argument"))
+            return
+        try:
+            per_amount = str(parse_positive_decimal(parts[0]))
+            duration = None if parts[1] == "-" else parse_duration(parts[1])
+            total_amount = (
+                None if parts[2] == "-" else str(parse_positive_decimal(parts[2]))
+            )
+            service = self._compensation_service(require_newapi=True)
+        except ValueError:
+            await self._send_action(event, ActionResult("comp_invalid_argument"))
+            return
+        except NewApiError as exc:
+            await self._send_action(
+                event,
+                ActionResult("newapi_error", {"error": str(exc)}),
+            )
+            return
+        result = await service.open(
+            group_id,
+            per_amount,
+            duration,
+            total_amount,
+            " ".join(parts[3:]),
+            str(event.get_sender_id()),
+        )
+        await self._send_action(event, result)
+
+    @compensation_commands.command("状态")
+    async def compensation_status(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "compensation")
+        if group_id:
+            await self._send_action(
+                event,
+                await self._compensation_service().status(group_id),
+            )
+
+    @compensation_commands.command("记录")
+    async def compensation_records(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "compensation")
+        if not group_id:
+            return
+        raw_page = self._command_tail(event, "补偿", "记录")
+        try:
+            page = int(raw_page) if raw_page else 1
+            if page <= 0:
+                raise ValueError
+            service = self._compensation_service()
+        except ValueError:
+            await self._send_action(event, ActionResult("comp_invalid_argument"))
+            return
+        await self._send_action(event, await service.records(group_id, page))
+
+    @compensation_commands.command("关闭")
+    async def compensation_close(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "compensation")
+        if not group_id:
+            return
+        await self._send_action(
+            event,
+            await self._compensation_service().close(
+                group_id,
+                self._command_tail(event, "补偿", "关闭"),
+            ),
+        )
+
+    @compensation_commands.command("核查")
+    async def compensation_review(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "compensation")
+        if not group_id:
+            return
+        parts = self._command_tail(event, "补偿", "核查").split()
+        if len(parts) != 2 or parts[1] not in {"成功", "失败"}:
+            await self._send_action(event, ActionResult("comp_invalid_argument"))
+            return
+        await self._send_action(
+            event,
+            await self._compensation_service().review(
+                group_id,
+                parts[0],
+                parts[1] == "成功",
+            ),
+        )
+
+    async def _handle_campaign_message(self, event: AstrMessageEvent) -> bool:
+        group_id = str(event.get_group_id()).strip()
+        user_id = str(event.get_sender_id()).strip()
+        text = self._mentioned_plain_text(event)
+        if not group_id or not user_id or text is None:
+            return False
+
+        if self._feature_group_enabled("lottery", group_id):
+            service = self._lottery_service()
+            target_match = re.fullmatch(r"抽奖\s+(\d+)", text)
+            if target_match:
+                try:
+                    service = self._lottery_service(require_newapi=True)
+                    result = await service.submit_target(
+                        group_id,
+                        user_id,
+                        target_match.group(1),
+                    )
+                except NewApiError as exc:
+                    result = ActionResult("newapi_error", {"error": str(exc)})
+                await self._send_action(event, result)
+                return True
+            if text == "确认 抽奖":
+                try:
+                    service = self._lottery_service(require_newapi=True)
+                    result = await service.confirm(group_id, user_id)
+                except NewApiError as exc:
+                    result = ActionResult("newapi_error", {"error": str(exc)})
+                await self._send_action(event, result)
+                return True
+            if text == "取消 抽奖":
+                await self._send_action(
+                    event,
+                    await service.cancel_confirmation(group_id, user_id),
+                )
+                return True
+            registration = await service.register(group_id, user_id, text)
+            if registration is not None:
+                await self._send_action(event, registration)
+                return True
+
+        if self._feature_group_enabled("compensation", group_id):
+            service = self._compensation_service()
+            target_match = re.fullmatch(r"补偿\s+(\d+)", text)
+            if target_match:
+                try:
+                    service = self._compensation_service(require_newapi=True)
+                    result = await service.submit(
+                        group_id,
+                        user_id,
+                        target_match.group(1),
+                    )
+                except NewApiError as exc:
+                    result = ActionResult("newapi_error", {"error": str(exc)})
+                await self._send_action(event, result)
+                return True
+            if text == "确认 补偿":
+                try:
+                    service = self._compensation_service(require_newapi=True)
+                    result = await service.confirm(group_id, user_id)
+                except NewApiError as exc:
+                    result = ActionResult("newapi_error", {"error": str(exc)})
+                await self._send_action(event, result)
+                return True
+            if text == "取消 补偿":
+                await self._send_action(
+                    event,
+                    await service.cancel(group_id, user_id),
+                )
+                return True
+        return False
+
+    async def _send_group_action(
+        self,
+        client: Any,
+        group_id: str,
+        result: ActionResult,
+    ) -> None:
+        try:
+            await client.call_action(
+                "send_group_msg",
+                group_id=int(group_id),
+                message=self._campaign_content(result),
+            )
+        except Exception as exc:  # noqa: BLE001 - OneBot boundary
+            logger.warning(
+                "Campaign group notification failed group=%s error_type=%s",
+                group_id,
+                type(exc).__name__,
+            )
+
+    async def _draw_due_lottery(
+        self,
+        activity: dict[str, Any],
+    ) -> None:
+        group_id = str(activity["group_id"])
+        if not self._feature_group_enabled("lottery", group_id):
+            return
+        for client in self._iter_onebot_clients():
+            try:
+                members = await self._call_action_list(
+                    client,
+                    "get_group_member_list",
+                    group_id=int(group_id),
+                )
+            except Exception as exc:  # noqa: BLE001 - OneBot boundary
+                logger.warning(
+                    "Scheduled lottery member list failed group=%s error_type=%s",
+                    group_id,
+                    type(exc).__name__,
+                )
+                continue
+            member_ids = [
+                str(member.get("user_id", "")).strip()
+                for member in members
+                if str(member.get("user_id", "")).strip()
+            ]
+            result = await self._lottery_service().draw(activity, member_ids)
+            await self._send_group_action(client, group_id, result)
+            return
+
+    async def _campaign_scheduler_once(self) -> None:
+        now = utc_now()
+        clients = self._iter_onebot_clients()
+        if self._feature_enabled("lottery"):
+            opened = await self.lottery_storage.mark_due_open(now=now)
+            for activity in opened:
+                group_id = str(activity["group_id"])
+                if clients and self._feature_group_enabled("lottery", group_id):
+                    await self._send_group_action(
+                        clients[0],
+                        group_id,
+                        ActionResult(
+                            "lottery_opened",
+                            {
+                                "title": activity["title"],
+                                "keyword": activity["keyword"],
+                            },
+                        ),
+                    )
+            for activity in await self.lottery_storage.due_draws(now=now):
+                await self._draw_due_lottery(activity)
+            closed = await self.lottery_storage.expire(now=now)
+            for activity in closed:
+                group_id = str(activity["group_id"])
+                if clients and self._feature_group_enabled("lottery", group_id):
+                    await self._send_group_action(
+                        clients[0],
+                        group_id,
+                        ActionResult(
+                            "lottery_claim_closed",
+                            {"title": activity["title"]},
+                        ),
+                    )
+        if self._feature_enabled("compensation"):
+            closed = await self.compensation_storage.tick(now=now)
+            for activity in closed:
+                group_id = str(activity["group_id"])
+                if clients and self._feature_group_enabled("compensation", group_id):
+                    await self._send_group_action(
+                        clients[0],
+                        group_id,
+                        ActionResult(
+                            "comp_auto_closed",
+                            {"title": activity["title"]},
+                        ),
+                    )
+
+    async def _campaign_scheduler_loop(self) -> None:
+        while True:
+            try:
+                await self._campaign_scheduler_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - background task boundary
+                logger.exception(
+                    "Campaign scheduler failed error_type=%s",
+                    type(exc).__name__,
+                )
+            await asyncio.sleep(CAMPAIGN_SCHEDULER_SECONDS)
+
     @filter.platform_adapter_type(PlatformAdapterType.AIOCQHTTP)
     async def handle_aiocqhttp_event(self, event: AstrMessageEvent) -> None:
-        if not self._enabled():
+        if not (
+            self._enabled()
+            or self._feature_enabled("lottery")
+            or self._feature_enabled("compensation")
+        ):
             return
 
         raw = self._raw_event(event)
         if raw and raw.get("post_type") == "notice":
-            if raw.get("notice_type") == "group_increase":
+            if self._enabled() and raw.get("notice_type") == "group_increase":
                 await self._handle_group_increase(event, raw)
             return
 
         if event.get_group_id():
-            await self._handle_claim(event)
+            if await self._handle_campaign_message(event):
+                return
+            if self._enabled():
+                await self._handle_claim(event)
 
     async def initialize(self) -> None:
-        """Initialize storage and start the one-time group baseline sync."""
-        await self.storage.initialize()
+        """Initialize storage and start background synchronization tasks."""
+        await asyncio.gather(
+            self.storage.initialize(),
+            self.lottery_storage.initialize(),
+            self.compensation_storage.initialize(),
+        )
+        recovered_lottery, recovered_compensation = await asyncio.gather(
+            self.lottery_storage.recover_processing(now=utc_now()),
+            self.compensation_storage.recover_processing(now=utc_now()),
+        )
+        if recovered_lottery or recovered_compensation:
+            logger.warning(
+                "Recovered ambiguous payouts lottery=%s compensation=%s",
+                recovered_lottery,
+                recovered_compensation,
+            )
         if self._enabled() and (
             self._baseline_task is None or self._baseline_task.done()
         ):
             self._baseline_task = asyncio.create_task(
                 self._baseline_sync_loop(),
                 name=f"{PLUGIN_NAME}:baseline-sync",
+            )
+        if (
+            self._feature_enabled("lottery") or self._feature_enabled("compensation")
+        ) and (self._campaign_task is None or self._campaign_task.done()):
+            self._campaign_task = asyncio.create_task(
+                self._campaign_scheduler_loop(),
+                name=f"{PLUGIN_NAME}:campaign-scheduler",
             )
 
     async def terminate(self) -> None:
@@ -408,3 +1114,11 @@ class TransferStationPlugin(Star):
             with suppress(asyncio.CancelledError):
                 await self._baseline_task
         self._baseline_task = None
+        if self._campaign_task is not None and not self._campaign_task.done():
+            self._campaign_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._campaign_task
+        self._campaign_task = None
+        if self._newapi_client is not None:
+            await self._newapi_client.close()
+        self._newapi_client = None

@@ -4,8 +4,11 @@ import json
 from pathlib import Path
 
 import yaml
+from astrbot.core.star.star_handler import star_handlers_registry
+from conftest import load_plugin_module
 
 ROOT = Path(__file__).resolve().parents[1]
+campaign_messages = load_plugin_module("campaign_messages")
 
 
 def test_metadata_and_config_contract():
@@ -13,11 +16,11 @@ def test_metadata_and_config_contract():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
     assert metadata["name"] == "astrbot_plugin_transfer_station"
-    assert metadata["version"] == "v1.2.0"
+    assert metadata["version"] == "v1.3.0"
     assert metadata["support_platforms"] == ["aiocqhttp"]
     assert metadata["astrbot_version"] == ">=4.16,<5"
     assert metadata["pages"][0]["name"] == "gift_codes"
-    assert set(schema) == {
+    assert {
         "enabled",
         "enabled_group_ids",
         "welcome_content",
@@ -31,7 +34,23 @@ def test_metadata_and_config_contract():
         "claim_failed_content",
         "claim_phrase",
         "mention_new_member",
-    }
+    }.issubset(schema)
+    assert {
+        "newapi_base_url",
+        "newapi_access_token",
+        "newapi_username",
+        "newapi_password",
+        "newapi_timeout_seconds",
+        "newapi_verify_ssl",
+        "newapi_allow_insecure_http",
+        "lottery_enabled",
+        "lottery_enabled_group_ids",
+        "compensation_enabled",
+        "compensation_enabled_group_ids",
+    }.issubset(schema)
+    assert {
+        f"{key}_content" for key in campaign_messages.CAMPAIGN_TEXT_DEFAULTS
+    }.issubset(schema)
 
 
 def test_page_uses_bridge_and_safe_dynamic_text_rendering():
@@ -55,3 +74,21 @@ def test_page_uses_bridge_and_safe_dynamic_text_rendering():
     assert "table-layout: fixed" in style
     assert 'id="knownUsers"' in html
     assert 'id="todayNewcomers"' in html
+
+
+def test_campaign_command_groups_require_admin_permission():
+    handlers = {
+        handler.handler_name: handler
+        for handler in star_handlers_registry
+        if handler.handler_name
+        in {"newapi_commands", "lottery_commands", "compensation_commands"}
+    }
+    assert set(handlers) == {
+        "newapi_commands",
+        "lottery_commands",
+        "compensation_commands",
+    }
+    for handler in handlers.values():
+        filter_names = {type(item).__name__ for item in handler.event_filters}
+        assert "PermissionTypeFilter" in filter_names
+        assert "CommandGroupFilter" in filter_names

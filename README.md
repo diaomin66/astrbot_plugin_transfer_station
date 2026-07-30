@@ -1,6 +1,6 @@
 # AstrBot 中转站机器人
 
-面向 QQ OneBot v11 / NapCat 的 AstrBot 新人礼插件。插件会记录实际入群的新人，在新人于同一群中 `@机器人` 并发送指定口令后，通过 QQ 群临时会话发放一个兑换码。
+面向 QQ OneBot v11 / NapCat 的 AstrBot 中转站插件。除新人礼外，`v1.3.0` 增加了独立的抽奖和补偿系统，可通过 QuantumNous New API 兼容接口给用户原子增加额度。
 
 ## 功能
 
@@ -14,6 +14,11 @@
 - 主动临时会话失败时，引导新人先私聊机器人建立会话，再回群重新领取。
 - AstrBot Plugin Page 提供批量导入、库存查看、复制、删除、领取记录、数据库人数和今日新人实时统计。
 - SQLite 持久化新人资格、库存和领取历史。
+- 抽奖和补偿分别使用独立 SQLite 数据库，与新人礼数据完全隔离。
+- New API 支持管理员访问令牌、兼容用户名密码登录、额度换算快照和人工核查状态。
+- 抽奖支持定时开奖、分级奖项、退群过滤、确认领奖和永久活动归档。
+- 补偿支持按持续时间/总预算结束、QQ 与 New API ID 双重去重和并发预算保护。
+- 抽奖、补偿和 New API 测试的机器人回复全部可配置。
 
 ## 环境要求
 
@@ -30,7 +35,7 @@
 https://github.com/diaomin66/astrbot_plugin_transfer_station
 ```
 
-更新前建议先备份 `gifts.db`。安装或更新到 `v1.2.0` 后重载插件，并在插件配置中设置领取口令、全部聊天文案和可选群白名单。插件会自动执行 SQLite v2 迁移并通过 OneBot 接口读取启用群成员列表；同步成功前该群不会发放新人礼。
+更新前建议备份插件数据目录。安装或更新到 `v1.3.0` 后重载插件；新人礼配置保持不变。需要抽奖或补偿时，再配置 New API、对应系统开关和群白名单。
 
 ## 使用
 
@@ -47,6 +52,13 @@ https://github.com/diaomin66/astrbot_plugin_transfer_station
 6. 机器人通过该群的 QQ 临时会话发送兑换码，群内仅提示发送结果。
 7. 若机器人无法主动建立临时会话，新人按群内提示先主动私聊机器人发送任意消息，再回群重新执行第 5 步。
 
+### 抽奖与补偿快速开始
+
+1. 配置 `newapi_base_url` 和管理员 `newapi_access_token`，在群内执行 `/newapi 测试`。
+2. 打开 `lottery_enabled` 或 `compensation_enabled`，按需填写各自群白名单。
+3. 按 [`docs/CAMPAIGNS.md`](docs/CAMPAIGNS.md) 的管理员指令创建活动。
+4. 首次联调请使用测试 New API 实例和测试用户，不要直接使用生产额度。
+
 ## 重要规则
 
 - 更新后首次启动会把启用群当前成员以及旧版资格、领取记录迁移到永久用户库；这些 QQ ID 不会获得新资格。
@@ -59,19 +71,21 @@ https://github.com/diaomin66/astrbot_plugin_transfer_station
 - 私聊兑换码文案支持 `{code}`；若没有填写该占位符，插件会自动在文案末尾附加兑换码。
 - 临时会话失败文案支持 `{claim_phrase}`，默认明确引导用户先主动私聊，再回群重新领取。
 - 若 NapCat 报错，兑换码会退回库存且不会记录领取，用户建立会话后可以重试。网络超时仍存在“QQ 实际已送达但本地回滚”的协议边界风险。
+- 抽奖/补偿的 New API 明确失败会释放资格；超时、断线或 5xx 会进入 `manual_review`，必须管理员核查，不会自动重试。
 - 完整兑换码只在未领取库存中保存；领取记录仅保留尾号和 SHA-256 摘要。
 - 插件无法识别更新时已经不在任何启用群、且旧数据库从未记录过的历史退群账号；该限制来自 QQ 群成员接口只能返回当前成员。
 
 更完整的部署、备份和排障说明见 [`docs/USAGE.md`](docs/USAGE.md)。
+抽奖、补偿和 New API 的完整运维说明见 [`docs/CAMPAIGNS.md`](docs/CAMPAIGNS.md)。
 
 ## 开发验证
 
 ```powershell
-python -m pytest -q
-python -m py_compile main.py page_api.py storage.py
+python -m pytest tests -q
+python -m py_compile main.py page_api.py storage.py campaign_utils.py campaign_messages.py newapi_client.py lottery.py compensation.py
 node --check pages/gift_codes/app.js
-ruff check .
-ruff format --check .
+ruff check main.py page_api.py storage.py campaign_utils.py campaign_messages.py newapi_client.py lottery.py compensation.py tests
+ruff format --check main.py page_api.py storage.py campaign_utils.py campaign_messages.py newapi_client.py lottery.py compensation.py tests
 ```
 
 ## License
