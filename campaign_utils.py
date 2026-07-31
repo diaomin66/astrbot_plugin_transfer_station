@@ -131,8 +131,9 @@ def is_reserved_lottery_keyword(keyword: str, claim_phrase: str) -> bool:
             "确认领奖",
             "确认 补偿",
             "取消 补偿",
+            "确认补偿",
         }
-        or re.fullmatch(r"(?:抽奖|领奖|补偿)\s+\d+", normalized) is not None
+        or re.fullmatch(r"(?:抽奖|领奖|补偿|领取补偿)\s+\d+", normalized) is not None
     )
 
 

@@ -560,6 +560,51 @@ class TransferStationPlugin(Star):
                 self._campaign_write_semaphore.release()
         await self._send_action(event, result)
 
+    async def _submit_compensation_claim(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        user_id: str,
+        newapi_user_id: str,
+    ) -> None:
+        if not await self._allow_user_lookup("compensation", group_id, user_id):
+            await self._send_action(event, ActionResult("campaign_rate_limited"))
+            return
+        try:
+            if not await self._acquire_user_lookup_slot():
+                result = ActionResult("campaign_rate_limited")
+            else:
+                try:
+                    service = self._compensation_service(require_newapi=True)
+                    result = await service.submit(
+                        group_id,
+                        user_id,
+                        newapi_user_id,
+                    )
+                finally:
+                    self._user_lookup_semaphore.release()
+        except NewApiError as exc:
+            result = self._newapi_error_action(exc)
+        await self._send_action(event, result)
+
+    async def _confirm_compensation_claim(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        user_id: str,
+    ) -> None:
+        if not await self._acquire_campaign_write_slot():
+            result = ActionResult("campaign_write_busy")
+        else:
+            try:
+                service = self._compensation_service(require_newapi=True)
+                result = await service.confirm(group_id, user_id)
+            except NewApiError as exc:
+                result = self._newapi_error_action(exc)
+            finally:
+                self._campaign_write_semaphore.release()
+        await self._send_action(event, result)
+
     async def _acquire_campaign_write_slot(self) -> bool:
         try:
             await asyncio.wait_for(
@@ -1187,6 +1232,42 @@ class TransferStationPlugin(Star):
             ),
         )
 
+    @filter.command("领取补偿")
+    async def compensation_claim_command(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "compensation")
+        if not group_id:
+            return
+        match = re.fullmatch(
+            r"领取补偿\s+(\d+)",
+            self._normalize_command_text(event.get_message_str()),
+        )
+        if not match:
+            await self._send_action(event, ActionResult("comp_claim_usage"))
+            return
+        await self._submit_compensation_claim(
+            event,
+            group_id,
+            str(event.get_sender_id()).strip(),
+            match.group(1),
+        )
+
+    @filter.command("确认补偿")
+    async def compensation_confirm_claim_command(
+        self,
+        event: AstrMessageEvent,
+    ) -> None:
+        group_id = await self._campaign_guard(event, "compensation")
+        if not group_id:
+            return
+        if self._normalize_command_text(event.get_message_str()) != "确认补偿":
+            await self._send_action(event, ActionResult("comp_confirm_usage"))
+            return
+        await self._confirm_compensation_claim(
+            event,
+            group_id,
+            str(event.get_sender_id()).strip(),
+        )
+
     @filter.command_group("补偿")
     @filter.permission_type(filter.PermissionType.ADMIN)
     def compensation_commands(self):
@@ -1324,45 +1405,15 @@ class TransferStationPlugin(Star):
             service = self._compensation_service()
             target_match = re.fullmatch(r"补偿\s+(\d+)", text)
             if target_match:
-                if not await self._allow_user_lookup(
-                    "compensation",
+                await self._submit_compensation_claim(
+                    event,
                     group_id,
                     user_id,
-                ):
-                    await self._send_action(
-                        event,
-                        ActionResult("campaign_rate_limited"),
-                    )
-                    return True
-                try:
-                    if not await self._acquire_user_lookup_slot():
-                        result = ActionResult("campaign_rate_limited")
-                    else:
-                        try:
-                            service = self._compensation_service(require_newapi=True)
-                            result = await service.submit(
-                                group_id,
-                                user_id,
-                                target_match.group(1),
-                            )
-                        finally:
-                            self._user_lookup_semaphore.release()
-                except NewApiError as exc:
-                    result = self._newapi_error_action(exc)
-                await self._send_action(event, result)
+                    target_match.group(1),
+                )
                 return True
             if text == "确认 补偿":
-                if not await self._acquire_campaign_write_slot():
-                    result = ActionResult("campaign_write_busy")
-                else:
-                    try:
-                        service = self._compensation_service(require_newapi=True)
-                        result = await service.confirm(group_id, user_id)
-                    except NewApiError as exc:
-                        result = self._newapi_error_action(exc)
-                    finally:
-                        self._campaign_write_semaphore.release()
-                await self._send_action(event, result)
+                await self._confirm_compensation_claim(event, group_id, user_id)
                 return True
             if text == "取消 补偿":
                 await self._send_action(

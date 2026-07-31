@@ -105,12 +105,14 @@ CAMPAIGN_TEXT_DEFAULTS = {
         "/补偿 核查 <流水号> <成功|失败>"
     ),
     "comp_invalid_argument": "补偿指令参数错误，请发送 /补偿 帮助。",
+    "comp_claim_usage": "领取补偿指令格式：/领取补偿 <New API用户ID>",
+    "comp_confirm_usage": "确认补偿指令格式：/确认补偿",
     "comp_active_exists": "本群已有一场进行中的补偿活动。",
     "comp_budget_too_small": "补偿总金额不足以发放一份完整补偿。",
     "comp_opened": (
         "补偿活动已开启（#{activity_id}）：{title}\n每人：{amount}\n"
         "结束时间：{end_time}\n总预算：{total_budget}\n"
-        "领取方式：@机器人 补偿 <New API用户ID>"
+        "领取方式：/领取补偿 <New API用户ID>"
     ),
     "comp_no_active": "本群当前没有进行中的补偿活动。",
     "comp_status": (
@@ -123,7 +125,7 @@ CAMPAIGN_TEXT_DEFAULTS = {
     "comp_confirmation": (
         "请确认补偿领取信息：\n活动：{activity}\n额度：{amount}\n"
         "New API ID：{user_id}\n用户名：{username}\n确认有效至：{expires_at}\n"
-        "发送：@机器人 确认 补偿\n或：@机器人 取消 补偿"
+        "发送：/确认补偿\n或：@机器人 取消 补偿"
     ),
     "comp_confirmation_expired": "补偿确认已过期，请重新提交 New API 用户 ID。",
     "comp_no_confirmation": "没有找到可确认的补偿申请。",

@@ -471,6 +471,18 @@
     "default": "补偿指令参数错误，请发送 /补偿 帮助。",
     "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
+  "comp_claim_usage_content": {
+    "description": "机器人回复文案：领取补偿指令格式：/领取补偿 <New API用户ID>",
+    "type": "string",
+    "default": "领取补偿指令格式：/领取补偿 <New API用户ID>",
+    "hint": "普通用户提交补偿目标 New API 用户 ID 时参数错误发送。"
+  },
+  "comp_confirm_usage_content": {
+    "description": "机器人回复文案：确认补偿指令格式：/确认补偿",
+    "type": "string",
+    "default": "确认补偿指令格式：/确认补偿",
+    "hint": "普通用户确认补偿时附带多余参数发送。"
+  },
   "comp_active_exists_content": {
     "description": "机器人回复文案：本群已有一场进行中的补偿活动。",
     "type": "string",
@@ -486,7 +498,7 @@
   "comp_opened_content": {
     "description": "机器人回复文案：补偿活动已开启（#{activity_id}）：{title}",
     "type": "text",
-    "default": "补偿活动已开启（#{activity_id}）：{title}\n每人：{amount}\n结束时间：{end_time}\n总预算：{total_budget}\n领取方式：@机器人 补偿 <New API用户ID>",
+    "default": "补偿活动已开启（#{activity_id}）：{title}\n每人：{amount}\n结束时间：{end_time}\n总预算：{total_budget}\n领取方式：/领取补偿 <New API用户ID>",
     "hint": "可用占位符：{activity_id}、{amount}、{end_time}、{title}、{total_budget}。"
   },
   "comp_no_active_content": {
@@ -522,7 +534,7 @@
   "comp_confirmation_content": {
     "description": "机器人回复文案：请确认补偿领取信息：",
     "type": "text",
-    "default": "请确认补偿领取信息：\n活动：{activity}\n额度：{amount}\nNew API ID：{user_id}\n用户名：{username}\n确认有效至：{expires_at}\n发送：@机器人 确认 补偿\n或：@机器人 取消 补偿",
+    "default": "请确认补偿领取信息：\n活动：{activity}\n额度：{amount}\nNew API ID：{user_id}\n用户名：{username}\n确认有效至：{expires_at}\n发送：/确认补偿\n或：@机器人 取消 补偿",
     "hint": "可用占位符：{activity}、{amount}、{expires_at}、{user_id}、{username}。"
   },
   "comp_confirmation_expired_content": {

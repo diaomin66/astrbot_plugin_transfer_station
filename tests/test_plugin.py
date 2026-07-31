@@ -158,6 +158,8 @@ def test_config_and_exact_claim_matching(plugin):
     assert plugin._reserved_lottery_keyword("确认 补偿") is True
     assert plugin._reserved_lottery_keyword("领奖 7") is True
     assert plugin._reserved_lottery_keyword("确认领奖") is True
+    assert plugin._reserved_lottery_keyword("领取补偿 8") is True
+    assert plugin._reserved_lottery_keyword("确认补偿") is True
     assert plugin._reserved_lottery_keyword("参与抽奖") is False
 
 
@@ -753,16 +755,12 @@ async def test_compensation_flow_and_exact_budget_close(tmp_path, monkeypatch):
     )
     assert opened.key == "comp_opened"
 
-    target_event = FakeEvent(
-        messages=[Comp.At(qq="999"), Comp.Plain("补偿 8")],
-    )
-    await plugin.handle_aiocqhttp_event(target_event)
+    target_event = FakeEvent(message_str="/领取补偿 8")
+    await plugin.compensation_claim_command(target_event)
     assert "用户名：user-8" in target_event.sent[0]
 
-    confirm_event = FakeEvent(
-        messages=[Comp.At(qq="999"), Comp.Plain("确认 补偿")],
-    )
-    await plugin.handle_aiocqhttp_event(confirm_event)
+    confirm_event = FakeEvent(message_str="/确认补偿")
+    await plugin.compensation_confirm_claim_command(confirm_event)
     assert "补偿发放成功" in confirm_event.sent[0]
     assert fake_newapi.added == [(8, 5000000)]
     assert await plugin.compensation_storage.get_active("100") is None

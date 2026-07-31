@@ -474,3 +474,37 @@
 - `progress.md`：仅在文件末尾追加本轮实施与验证记录。
 - 本轮未修改、删除、暂存或提交工作区现有 Adobe2API、归档包、Compose、HAProxy 和取证目录。
 - 回滚方式：执行 `git revert <本轮提交哈希>` 并重启 AstrBot；本轮没有数据库迁移，无需恢复数据库。
+
+## 2026-07-31 - Task: 将补偿领取抽离为普通用户独立指令
+
+### What was done
+
+- 修复普通用户发送“补偿 <New API用户ID>”时被 `/补偿` 管理命令组的 AstrBot `ADMIN` 权限提前拦截的问题。
+- 新增普通用户独立指令 `/领取补偿 <New API用户ID>` 与 `/确认补偿`，两者不带管理员权限过滤；原 `/补偿 ...` 开启、状态、记录、关闭和核查命令继续保持 `ADMIN` 权限。
+- 独立指令复用原有活动状态、QQ/New API ID 双重防重、预算占用、五分钟确认、并发限流、失败释放和人工核查流程，不修改补偿数据库结构或历史数据。
+- 补偿开启公告、确认提示、README 和活动文档统一改为新指令；新增两条可自定义的参数错误文案；插件版本升级为 `v1.4.3`。
+
+### Testing
+
+- 先新增回归并确认修复前稳定失败：插件不存在独立补偿领取处理器，命令注册表中也没有普通用户补偿指令。
+- `python -m pytest -q`：`129 passed`；仅 AstrBot 依赖产生已知 `audioop` 弃用警告。
+- `npm test`：`11 passed`。
+- `ruff check`：通过；`ruff format --check`：`11 files already formatted`。
+- Python 编译、Campaign Page JavaScript 语法、JSON/YAML 解析和 `git diff --check`：通过。
+- AstrBot `4.26.7` 非侵入式加载检查：`/领取补偿` 与 `/确认补偿` 仅注册 `CommandFilter`，不含 `PermissionTypeFilter`；`/补偿` 仍同时注册 `PermissionTypeFilter` 与 `CommandGroupFilter`。
+
+### Notes
+
+- `main.py`：注册两个普通用户补偿领取命令并提取共享的提交、确认流程，避免降低管理员命令组权限。
+- `campaign_messages.py`：新增独立补偿指令错误提示并更新活动开启、确认默认文案。
+- `campaign_utils.py`：将新补偿指令加入抽奖报名口令冲突保护。
+- `_conf_schema.json`：增加独立补偿参数错误的可配置文案并同步新指令提示。
+- `metadata.yaml`：版本升级为 `v1.4.3`。
+- `README.md`：更新版本说明和普通用户补偿操作方式。
+- `docs/CAMPAIGNS.md`：说明独立补偿指令与管理员补偿命令的权限边界。
+- `docs/USAGE.md`：更新安装升级版本说明。
+- `tests/test_plugin.py`：覆盖 `/领取补偿`、`/确认补偿` 的完整预算发放流程及口令冲突保护。
+- `tests/test_static_contract.py`：验证独立补偿指令没有管理员权限过滤，管理命令权限保持不变。
+- `progress.md`：仅在文件末尾追加本轮实施与验证记录。
+- 本轮未修改、删除、暂存或提交工作区现有 Adobe2API、归档包、Compose、HAProxy 和取证目录。
+- 回滚方式：执行 `git revert <本轮提交哈希>` 并重启 AstrBot；本轮没有数据库迁移，无需恢复数据库。
