@@ -440,3 +440,37 @@
 
 - `tests/test_plugin.py`：新增 `/newapi 测试` 入口的旧版认证失败提示回归。
 - 回滚方式：随本轮提交一起执行 `git revert <本轮提交哈希>`；提交前后均不触碰 Adobe2API 无关文件。
+
+## 2026-07-30 - Task: 将中奖者领奖抽离为普通用户独立指令
+
+### What was done
+
+- 修复中奖者发送“抽奖 <New API用户ID>”时被 `/抽奖` 管理命令组的 AstrBot `ADMIN` 权限提前拦截的问题。
+- 新增普通用户独立指令 `/领奖 <New API用户ID>` 与 `/确认领奖`，两者不带管理员权限过滤；原 `/抽奖 ...` 创建、配置、开奖和核查命令继续保持 `ADMIN` 权限。
+- 独立指令复用原有中奖资格校验、New API 用户查询、五分钟确认、并发限流、防重复发放和人工核查流程，不修改抽奖数据库结构或历史数据。
+- 开奖公告、确认提示、README 和活动文档统一改为新指令；新增两条可自定义的参数错误文案；插件版本升级为 `v1.4.2`。
+
+### Testing
+
+- 先新增回归并确认修复前稳定失败：插件不存在独立领奖处理器，命令注册表中也没有普通用户领奖指令。
+- `python -m pytest -q`：`128 passed`；仅 AstrBot 依赖产生已知 `audioop` 弃用警告。
+- `npm test`：`11 passed`。
+- `ruff check`：通过；`ruff format --check`：`11 files already formatted`。
+- Python 编译、Campaign Page JavaScript 语法、JSON/YAML 解析和 `git diff --check`：通过。
+- AstrBot `4.26.7` 非侵入式加载检查：`/领奖` 与 `/确认领奖` 仅注册 `CommandFilter`，不含 `PermissionTypeFilter`；`/抽奖` 仍同时注册 `PermissionTypeFilter` 与 `CommandGroupFilter`。
+
+### Notes
+
+- `main.py`：注册两个普通用户领奖命令并提取共享的提交、确认流程，避免降低管理员命令组权限。
+- `campaign_messages.py`：新增独立领奖指令错误提示并更新开奖、确认默认文案。
+- `campaign_utils.py`：将新领奖指令加入抽奖报名口令冲突保护。
+- `_conf_schema.json`：增加独立领奖参数错误的可配置文案并同步新指令提示。
+- `metadata.yaml`：版本升级为 `v1.4.2`。
+- `README.md`：更新版本说明和普通用户操作方式。
+- `docs/CAMPAIGNS.md`：说明独立领奖指令与管理员抽奖命令的权限边界。
+- `docs/USAGE.md`：更新安装升级版本说明。
+- `tests/test_plugin.py`：覆盖 `/领奖`、`/确认领奖` 的完整中奖发放流程及口令冲突保护。
+- `tests/test_static_contract.py`：验证独立领奖指令没有管理员权限过滤，管理命令权限保持不变。
+- `progress.md`：仅在文件末尾追加本轮实施与验证记录。
+- 本轮未修改、删除、暂存或提交工作区现有 Adobe2API、归档包、Compose、HAProxy 和取证目录。
+- 回滚方式：执行 `git revert <本轮提交哈希>` 并重启 AstrBot；本轮没有数据库迁移，无需恢复数据库。

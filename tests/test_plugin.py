@@ -156,6 +156,8 @@ def test_config_and_exact_claim_matching(plugin):
     assert plugin._group_enabled("100") is True
     assert plugin._reserved_lottery_keyword("领取新人礼") is True
     assert plugin._reserved_lottery_keyword("确认 补偿") is True
+    assert plugin._reserved_lottery_keyword("领奖 7") is True
+    assert plugin._reserved_lottery_keyword("确认领奖") is True
     assert plugin._reserved_lottery_keyword("参与抽奖") is False
 
 
@@ -720,16 +722,12 @@ async def test_lottery_user_registration_and_payout_flow(tmp_path, monkeypatch):
         ["200"],
         now=now,
     )
-    target_event = FakeEvent(
-        messages=[Comp.At(qq="999"), Comp.Plain("抽奖 7")],
-    )
-    await plugin.handle_aiocqhttp_event(target_event)
+    target_event = FakeEvent(message_str="/领奖 7")
+    await plugin.lottery_claim_command(target_event)
     assert "用户名：user-7" in target_event.sent[0]
 
-    confirm_event = FakeEvent(
-        messages=[Comp.At(qq="999"), Comp.Plain("确认 抽奖")],
-    )
-    await plugin.handle_aiocqhttp_event(confirm_event)
+    confirm_event = FakeEvent(message_str="/确认领奖")
+    await plugin.lottery_confirm_claim_command(confirm_event)
     assert "发放成功" in confirm_event.sent[0]
     assert fake_newapi.added == [(7, 5000000)]
 

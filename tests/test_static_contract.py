@@ -17,7 +17,7 @@ def test_metadata_and_config_contract():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
     assert metadata["name"] == "astrbot_plugin_transfer_station"
-    assert metadata["version"] == "v1.4.1"
+    assert metadata["version"] == "v1.4.2"
     assert metadata["support_platforms"] == ["aiocqhttp"]
     assert metadata["astrbot_version"] == ">=4.26,<5"
     assert [page["name"] for page in metadata["pages"]] == [
@@ -158,3 +158,18 @@ def test_campaign_command_groups_require_admin_permission():
         filter_names = {type(item).__name__ for item in handler.event_filters}
         assert "PermissionTypeFilter" in filter_names
         assert "CommandGroupFilter" in filter_names
+
+
+def test_lottery_claim_commands_do_not_require_admin_permission():
+    handlers = [
+        handler
+        for handler in star_handlers_registry
+        if handler.handler_module_path == f"{ROOT.name}.main"
+        and handler.handler_name
+        in {"lottery_claim_command", "lottery_confirm_claim_command"}
+    ]
+    assert len(handlers) == 2
+    for handler in handlers:
+        filter_names = {type(item).__name__ for item in handler.event_filters}
+        assert "CommandFilter" in filter_names
+        assert "PermissionTypeFilter" not in filter_names

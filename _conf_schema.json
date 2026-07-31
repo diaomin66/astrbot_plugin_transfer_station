@@ -219,6 +219,18 @@
     "default": "抽奖指令参数错误，请发送 /抽奖 帮助。",
     "hint": "可自定义机器人在对应场景发送的完整文字。"
   },
+  "lottery_claim_usage_content": {
+    "description": "机器人回复文案：领奖指令格式：/领奖 <New API用户ID>",
+    "type": "string",
+    "default": "领奖指令格式：/领奖 <New API用户ID>",
+    "hint": "普通中奖者提交 New API 用户 ID 时参数错误发送。"
+  },
+  "lottery_confirm_usage_content": {
+    "description": "机器人回复文案：确认领奖指令格式：/确认领奖",
+    "type": "string",
+    "default": "确认领奖指令格式：/确认领奖",
+    "hint": "普通中奖者确认领奖时附带多余参数发送。"
+  },
   "lottery_active_exists_content": {
     "description": "机器人回复文案：本群已有一场未结束的抽奖活动。",
     "type": "string",
@@ -336,7 +348,7 @@
   "lottery_drawn_content": {
     "description": "机器人回复文案：抽奖“{title}”开奖结果：",
     "type": "text",
-    "default": "抽奖“{title}”开奖结果：\n{winners}\n领奖截止：{claim_deadline}\n中奖者请发送：@机器人 抽奖 <New API用户ID>",
+    "default": "抽奖“{title}”开奖结果：\n{winners}\n领奖截止：{claim_deadline}\n中奖者请发送：/领奖 <New API用户ID>",
     "hint": "可用占位符：{claim_deadline}、{title}、{winners}。"
   },
   "lottery_not_winner_content": {
@@ -378,7 +390,7 @@
   "lottery_confirmation_content": {
     "description": "机器人回复文案：请确认抽奖领奖信息：",
     "type": "text",
-    "default": "请确认抽奖领奖信息：\n活动：{activity}\n奖项：{prize}\n额度：{amount}\nNew API ID：{user_id}\n用户名：{username}\n确认有效至：{expires_at}\n发送：@机器人 确认 抽奖\n或：@机器人 取消 抽奖",
+    "default": "请确认抽奖领奖信息：\n活动：{activity}\n奖项：{prize}\n额度：{amount}\nNew API ID：{user_id}\n用户名：{username}\n确认有效至：{expires_at}\n发送：/确认领奖\n或：@机器人 取消 抽奖",
     "hint": "可用占位符：{activity}、{amount}、{expires_at}、{prize}、{user_id}、{username}。"
   },
   "lottery_confirmation_expired_content": {

@@ -124,8 +124,15 @@ def is_reserved_lottery_keyword(keyword: str, claim_phrase: str) -> bool:
     normalized = str(keyword).strip()
     return (
         normalized == str(claim_phrase).strip()
-        or normalized in {"确认 抽奖", "取消 抽奖", "确认 补偿", "取消 补偿"}
-        or re.fullmatch(r"(?:抽奖|补偿)\s+\d+", normalized) is not None
+        or normalized
+        in {
+            "确认 抽奖",
+            "取消 抽奖",
+            "确认领奖",
+            "确认 补偿",
+            "取消 补偿",
+        }
+        or re.fullmatch(r"(?:抽奖|领奖|补偿)\s+\d+", normalized) is not None
     )
 
 

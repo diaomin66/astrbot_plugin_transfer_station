@@ -515,6 +515,51 @@ class TransferStationPlugin(Star):
             return False
         return True
 
+    async def _submit_lottery_claim(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        user_id: str,
+        newapi_user_id: str,
+    ) -> None:
+        if not await self._allow_user_lookup("lottery", group_id, user_id):
+            await self._send_action(event, ActionResult("campaign_rate_limited"))
+            return
+        try:
+            if not await self._acquire_user_lookup_slot():
+                result = ActionResult("campaign_rate_limited")
+            else:
+                try:
+                    service = self._lottery_service(require_newapi=True)
+                    result = await service.submit_target(
+                        group_id,
+                        user_id,
+                        newapi_user_id,
+                    )
+                finally:
+                    self._user_lookup_semaphore.release()
+        except NewApiError as exc:
+            result = self._newapi_error_action(exc)
+        await self._send_action(event, result)
+
+    async def _confirm_lottery_claim(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        user_id: str,
+    ) -> None:
+        if not await self._acquire_campaign_write_slot():
+            result = ActionResult("campaign_write_busy")
+        else:
+            try:
+                service = self._lottery_service(require_newapi=True)
+                result = await service.confirm(group_id, user_id)
+            except NewApiError as exc:
+                result = self._newapi_error_action(exc)
+            finally:
+                self._campaign_write_semaphore.release()
+        await self._send_action(event, result)
+
     async def _acquire_campaign_write_slot(self) -> bool:
         try:
             await asyncio.wait_for(
@@ -834,6 +879,39 @@ class TransferStationPlugin(Star):
         except NewApiError as exc:
             action = self._newapi_error_action(exc)
         await event.send(event.plain_result(self._campaign_content(action)))
+
+    @filter.command("领奖")
+    async def lottery_claim_command(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        match = re.fullmatch(
+            r"领奖\s+(\d+)",
+            self._normalize_command_text(event.get_message_str()),
+        )
+        if not match:
+            await self._send_action(event, ActionResult("lottery_claim_usage"))
+            return
+        await self._submit_lottery_claim(
+            event,
+            group_id,
+            str(event.get_sender_id()).strip(),
+            match.group(1),
+        )
+
+    @filter.command("确认领奖")
+    async def lottery_confirm_claim_command(self, event: AstrMessageEvent) -> None:
+        group_id = await self._campaign_guard(event, "lottery")
+        if not group_id:
+            return
+        if self._normalize_command_text(event.get_message_str()) != "确认领奖":
+            await self._send_action(event, ActionResult("lottery_confirm_usage"))
+            return
+        await self._confirm_lottery_claim(
+            event,
+            group_id,
+            str(event.get_sender_id()).strip(),
+        )
 
     @filter.command_group("抽奖")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -1221,45 +1299,15 @@ class TransferStationPlugin(Star):
             service = self._lottery_service()
             target_match = re.fullmatch(r"抽奖\s+(\d+)", text)
             if target_match:
-                if not await self._allow_user_lookup(
-                    "lottery",
+                await self._submit_lottery_claim(
+                    event,
                     group_id,
                     user_id,
-                ):
-                    await self._send_action(
-                        event,
-                        ActionResult("campaign_rate_limited"),
-                    )
-                    return True
-                try:
-                    if not await self._acquire_user_lookup_slot():
-                        result = ActionResult("campaign_rate_limited")
-                    else:
-                        try:
-                            service = self._lottery_service(require_newapi=True)
-                            result = await service.submit_target(
-                                group_id,
-                                user_id,
-                                target_match.group(1),
-                            )
-                        finally:
-                            self._user_lookup_semaphore.release()
-                except NewApiError as exc:
-                    result = self._newapi_error_action(exc)
-                await self._send_action(event, result)
+                    target_match.group(1),
+                )
                 return True
             if text == "确认 抽奖":
-                if not await self._acquire_campaign_write_slot():
-                    result = ActionResult("campaign_write_busy")
-                else:
-                    try:
-                        service = self._lottery_service(require_newapi=True)
-                        result = await service.confirm(group_id, user_id)
-                    except NewApiError as exc:
-                        result = self._newapi_error_action(exc)
-                    finally:
-                        self._campaign_write_semaphore.release()
-                await self._send_action(event, result)
+                await self._confirm_lottery_claim(event, group_id, user_id)
                 return True
             if text == "取消 抽奖":
                 await self._send_action(

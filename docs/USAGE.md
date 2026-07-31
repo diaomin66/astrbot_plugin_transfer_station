@@ -15,7 +15,7 @@
 https://github.com/diaomin66/astrbot_plugin_transfer_station
 ```
 
-安装或更新后重启 AstrBot。`v1.4.1` 会保留现有数据库，不会清空新人资格、永久用户、兑换码或活动历史。
+安装或更新后重启 AstrBot。`v1.4.2` 会保留现有数据库，不会清空新人资格、永久用户、兑换码或活动历史。
 
 ## 2. 新人礼配置
 
@@ -251,7 +251,7 @@ data/plugin_data/astrbot_plugin_transfer_station/
 
 1. 停止 AstrBot 并备份三个数据库。
 2. 更新插件。
-3. 启动 AstrBot，确认版本为 `v1.4.1`。
+3. 启动 AstrBot，确认版本为 `v1.4.2`。
 4. 打开两个 Plugin Page，检查统计与历史活动。
 5. 执行 New API 连接测试。
 6. 在测试群完成一次小额度抽奖和补偿。

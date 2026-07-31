@@ -26,6 +26,8 @@ CAMPAIGN_TEXT_DEFAULTS = {
         "/抽奖 核查 <流水号> <成功|失败>"
     ),
     "lottery_invalid_argument": "抽奖指令参数错误，请发送 /抽奖 帮助。",
+    "lottery_claim_usage": "领奖指令格式：/领奖 <New API用户ID>",
+    "lottery_confirm_usage": "确认领奖指令格式：/确认领奖",
     "lottery_active_exists": "本群已有一场未结束的抽奖活动。",
     "lottery_created": (
         "抽奖草稿已创建（#{activity_id}）：{title}\n"
@@ -66,7 +68,7 @@ CAMPAIGN_TEXT_DEFAULTS = {
     "lottery_drawn": (
         "抽奖“{title}”开奖结果：\n{winners}\n"
         "领奖截止：{claim_deadline}\n"
-        "中奖者请发送：@机器人 抽奖 <New API用户ID>"
+        "中奖者请发送：/领奖 <New API用户ID>"
     ),
     "lottery_not_winner": "你不是当前抽奖的中奖者。",
     "lottery_claim_expired": "该中奖资格已经超过领奖期限。",
@@ -77,7 +79,7 @@ CAMPAIGN_TEXT_DEFAULTS = {
     "lottery_confirmation": (
         "请确认抽奖领奖信息：\n活动：{activity}\n奖项：{prize}\n额度：{amount}\n"
         "New API ID：{user_id}\n用户名：{username}\n确认有效至：{expires_at}\n"
-        "发送：@机器人 确认 抽奖\n或：@机器人 取消 抽奖"
+        "发送：/确认领奖\n或：@机器人 取消 抽奖"
     ),
     "lottery_confirmation_expired": "抽奖领奖确认已过期，请重新提交 New API 用户 ID。",
     "lottery_no_confirmation": "没有找到可确认的抽奖领奖申请。",
